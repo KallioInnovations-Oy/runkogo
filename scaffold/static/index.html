@@ -325,7 +325,7 @@
 
   <div class="hero">
     <h1>Runko<span class="accent">GO</span></h1>
-    <p>Zero-dependency Go framework for scalable web apps and microservice clusters. This scaffold is your binary — everything you see ships inside it.</p>
+    <p>Zero-dependency Go framework for JSON APIs and microservice clusters. This scaffold is your binary — everything you see ships inside it.</p>
     <div class="hero-meta">
       <span>go {{.GoVersion}}</span>
       <span>0 deps</span>
@@ -409,6 +409,29 @@
     </div>
   </section>
 
+  <!-- WHAT YOU CAN BUILD -->
+  <section>
+    <h2>// what you can build</h2>
+    <div class="modules">
+      <div class="card">
+        <h3>REST APIs</h3>
+        <p>JSON request/response helpers, pagination, validation errors, and consistent error shapes out of the box.</p>
+      </div>
+      <div class="card">
+        <h3>Microservice clusters</h3>
+        <p>Service-to-service client with retries, circuit breaking, and automatic request ID / trace ID propagation.</p>
+      </div>
+      <div class="card">
+        <h3>SPA & mobile backends</h3>
+        <p>CORS, rate limiting, security headers, and Bearer token auth patterns ready for frontend consumption.</p>
+      </div>
+      <div class="card">
+        <h3>Internal tools</h3>
+        <p>Health checks for orchestrators, structured logging for observability, and env-based config for 12-factor deploys.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- ARCHITECTURE -->
   <section>
     <h2>// framework modules</h2>
@@ -440,6 +463,14 @@
       <div class="card">
         <h3>response.go</h3>
         <p>JSON, errors, pagination, body decoding with trailing data check and size limits.</p>
+      </div>
+      <div class="card">
+        <h3>hosts.go</h3>
+        <p>Allowed host validation. Prevents host header injection for routing, caching, and password reset attacks.</p>
+      </div>
+      <div class="card">
+        <h3>logger.go</h3>
+        <p>Structured JSON logging via <code>slog</code>. Context-aware: automatically includes request ID, client IP, user ID.</p>
       </div>
       <div class="card">
         <h3>config.go</h3>

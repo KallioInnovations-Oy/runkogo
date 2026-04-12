@@ -1,10 +1,10 @@
 # RunkoGO
 
-A zero-dependency Go framework for scalable web applications and microservice clusters. Built by [KallioInnovations Oy](https://kallioinnovations.fi).
+A zero-dependency Go framework for JSON APIs and microservice clusters. Built by [KallioInnovations Oy](https://kallioinnovations.fi).
 
 **Runko** (Finnish) — *frame, skeleton, chassis*. The structural core that everything else builds on.
 
-**Philosophy**: Every application built with RunkoGO is a single binary that already behaves correctly in a cluster. The developer focuses on business logic; the framework handles operational plumbing.
+**Philosophy**: Every service built with RunkoGO is a single binary that already behaves correctly in a cluster. The developer focuses on business logic; the framework handles operational plumbing.
 
 ## Features
 
@@ -19,6 +19,7 @@ All features use only the Go standard library (Go 1.22+). Zero external dependen
 - **Context propagation** — Request ID, user ID, and trace ID flow through every call
 - **HTTP client** — Service-to-service calls with retries, circuit breaker, and header forwarding
 - **Response helpers** — JSON, errors, pagination, and request body decoding
+- **Security** — Headers, host validation, trusted proxy resolution, body limits
 
 ## Quick Start
 
@@ -51,17 +52,20 @@ kill -TERM $(pgrep -f "go run .")
 ```
 runkogo/
 ├── app.go          # App lifecycle, startup/shutdown, health checks
+├── client.go       # HTTP client with retries and circuit breaker
 ├── config.go       # Environment variable loading
 ├── context.go      # Request-scoped context values
+├── hosts.go        # Allowed host validation middleware
 ├── logger.go       # Structured logging (slog wrapper)
-├── router.go       # Router with groups and middleware support
-├── middleware.go   # Standard middleware (recovery, logging, CORS, rate limit)
+├── middleware.go    # Standard middleware (recovery, logging, CORS, rate limit)
+├── proxy.go        # Trusted proxy IP resolution
 ├── response.go     # JSON response helpers, error formatting, pagination
-├── client.go       # HTTP client with retries and circuit breaker
+├── router.go       # Router with groups and middleware support
+├── sanitize.go     # Request ID validation and sanitization
+├── security.go     # Security headers middleware
 ├── go.mod
-└── example/
-    ├── main.go     # Complete example application
-    └── go.mod
+├── example/        # Complete example API
+└── scaffold/       # Self-documenting starter application
 ```
 
 ## Architecture Guide
@@ -193,12 +197,12 @@ Built-in endpoints are registered automatically:
 - `GET /readyz` — Readiness: "can it handle traffic?" Runs registered health checks.
 
 ```go
-app.AddHealthCheck("database", func() error {
-    return db.Ping()
+app.AddHealthCheck("database", 5*time.Second, func(ctx context.Context) error {
+    return db.PingContext(ctx)
 })
 
-app.AddHealthCheck("redis", func() error {
-    return redis.Ping()
+app.AddHealthCheck("redis", 2*time.Second, func(ctx context.Context) error {
+    return redis.Ping(ctx).Err()
 })
 ```
 

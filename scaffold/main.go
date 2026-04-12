@@ -227,7 +227,7 @@ func main() {
 			Port:        port,
 			GoVersion:   runtime.Version(),
 			BinarySize:  binarySize(),
-			FileCount:   "11",
+			FileCount:   "12",
 		},
 	}
 

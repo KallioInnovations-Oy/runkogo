@@ -53,6 +53,10 @@ type App struct {
 	// tlsCert and tlsKey paths for HTTPS. Both empty = HTTP only.
 	tlsCert string
 	tlsKey  string
+
+	// stop cancels the Run() context, triggering graceful shutdown.
+	// Set internally by Run(); used by tests via triggerShutdown().
+	stop context.CancelFunc
 }
 
 // healthState tracks liveness and readiness independently.
@@ -205,6 +209,7 @@ func (a *App) Run() error {
 	// Create root context that cancels on OS signal.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	a.stop = stop
 
 	// Run startup hooks.
 	for _, fn := range a.onStartup {

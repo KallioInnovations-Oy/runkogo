@@ -428,6 +428,7 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 	var mu sync.Mutex
 	clients := make(map[string]*client)
 	lastCleanup := time.Now()
+	capacityWarned := false
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -459,12 +460,22 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 				if count < 500 {
 					lastCleanup = now // full sweep completed
 				}
+				if len(clients) < cfg.MaxClients {
+					capacityWarned = false
+				}
 			}
 
 			c, exists := clients[ip]
 			if !exists || now.Sub(c.windowStart) > cfg.Window {
 				// Check map capacity before adding new entry. (CONV-06)
 				if !exists && len(clients) >= cfg.MaxClients {
+					if !capacityWarned {
+						capacityWarned = true
+						slog.Warn("rate limiter at capacity, rejecting new clients",
+							"max_clients", cfg.MaxClients,
+							"tracked_clients", len(clients),
+						)
+					}
 					mu.Unlock()
 					w.Header().Set("Retry-After", fmt.Sprintf("%d", int(cfg.Window.Seconds())))
 					Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")

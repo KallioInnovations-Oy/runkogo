@@ -232,6 +232,15 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 //   - Open (tripped): requests rejected immediately
 //   - Half-open (after cooldown): ONE request allowed to test recovery;
 //     all others are rejected until the probe succeeds or fails.
+//
+// Note on half-open behavior: exactly one probe request is permitted.
+// If that probe is slow (e.g., the downstream service is responding
+// slowly rather than failing fast), all other requests are rejected
+// until the probe completes. In the worst case, recovery speed is
+// gated by the per-request Timeout rather than the CircuitCooldown.
+// This is a deliberate trade-off to prevent the thundering herd
+// problem where many goroutines all probe a recovering service
+// simultaneously and overwhelm it again.
 type circuitBreaker struct {
 	mu          sync.Mutex
 	failures    int
