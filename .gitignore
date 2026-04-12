@@ -1,0 +1,27 @@
+# Build output
+bin/
+coverage.out
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

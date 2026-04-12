@@ -224,6 +224,7 @@ func (sw *statusWriter) WriteHeader(code int) {
 
 func (sw *statusWriter) Write(b []byte) (int, error) {
 	if !sw.written {
+		sw.statusCode = http.StatusOK
 		sw.written = true
 	}
 	return sw.ResponseWriter.Write(b)

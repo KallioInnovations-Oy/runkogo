@@ -233,7 +233,7 @@ runko.Paginated(w, users, page, perPage, total)
 
 // Decode request body (with size limit and unknown field rejection)
 var req CreateUserRequest
-if err := runko.Decode(r, &req); err != nil {
+if err := runko.Decode(w, r, &req); err != nil {
     runko.Error(w, 400, "invalid_body", "Bad JSON")
     return
 }

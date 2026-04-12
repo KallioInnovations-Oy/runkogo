@@ -124,8 +124,8 @@ func Paginated(w http.ResponseWriter, data any, page, perPage, total int) {
 //
 // The body is limited to 1MB by default. Use DecodeWithLimit for a
 // custom size limit.
-func Decode(r *http.Request, target any) error {
-	return DecodeWithLimit(r, target, 1<<20) // 1MB
+func Decode(w http.ResponseWriter, r *http.Request, target any) error {
+	return DecodeWithLimit(w, r, target, 1<<20) // 1MB
 }
 
 // DecodeWithLimit reads a JSON request body with a custom size limit.
@@ -139,8 +139,8 @@ func Decode(r *http.Request, target any) error {
 //   - The JSON is malformed
 //   - Unknown fields are present
 //   - Multiple JSON values are present (trailing data)
-func DecodeWithLimit(r *http.Request, target any, maxBytes int64) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
+func DecodeWithLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()

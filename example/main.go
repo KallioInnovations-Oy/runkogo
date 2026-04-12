@@ -157,7 +157,7 @@ func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/users
 func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req CreateUserRequest
-	if err := runko.Decode(r, &req); err != nil {
+	if err := runko.Decode(w, r, &req); err != nil {
 		runko.Error(w, http.StatusBadRequest, "invalid_body", "Invalid JSON body")
 		return
 	}

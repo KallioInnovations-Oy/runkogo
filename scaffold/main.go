@@ -102,7 +102,7 @@ func (h *Handlers) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Name  string `json:"name"`
 		Email string `json:"email"`
 	}
-	if err := runko.Decode(r, &req); err != nil {
+	if err := runko.Decode(w, r, &req); err != nil {
 		runko.Error(w, http.StatusBadRequest, "invalid_body", "Invalid JSON body")
 		return
 	}

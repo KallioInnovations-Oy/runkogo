@@ -19,7 +19,7 @@ func TestDecode_ValidJSON(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	var p payload
-	err := Decode(req, &p)
+	err := Decode(httptest.NewRecorder(), req, &p)
 	if err != nil {
 		t.Fatalf("Decode valid JSON: unexpected error: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestDecode_TrailingData_Rejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
 
 	var p payload
-	err := Decode(req, &p)
+	err := Decode(httptest.NewRecorder(), req, &p)
 	if err == nil {
 		t.Fatal("Decode with trailing data should return error")
 	}
@@ -55,7 +55,7 @@ func TestDecode_UnknownFields_Rejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
 
 	var p payload
-	err := Decode(req, &p)
+	err := Decode(httptest.NewRecorder(), req, &p)
 	if err == nil {
 		t.Fatal("Decode with unknown fields should return error")
 	}
@@ -72,7 +72,7 @@ func TestDecode_Oversized_Rejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
 
 	var p payload
-	err := DecodeWithLimit(req, &p, 100)
+	err := DecodeWithLimit(httptest.NewRecorder(), req, &p, 100)
 	if err == nil {
 		t.Fatal("DecodeWithLimit should reject oversized body")
 	}
