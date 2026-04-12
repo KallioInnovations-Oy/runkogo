@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RunkoGO — {{.ServiceName}}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@400;500;700&display=swap');
+
+  :root {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --surface-raised: #1c2129;
+    --border: #2d333b;
+    --text: #e6edf3;
+    --text-muted: #7d8590;
+    --accent: #58a6ff;
+    --accent-dim: #1f3a5f;
+    --green: #3fb950;
+    --green-dim: #1a3a2a;
+    --yellow: #d29922;
+    --red: #f85149;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'DM Sans', system-ui, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* Top bar */
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .topbar-brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--accent);
+    letter-spacing: -0.02em;
+  }
+  .topbar-brand span { color: var(--text-muted); font-weight: 400; }
+  .topbar-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--green);
+  }
+  .topbar-status::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Layout */
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+
+  /* Hero */
+  .hero {
+    padding: 3rem 0 2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+  }
+  .hero h1 {
+    font-family: var(--mono);
+    font-size: 2.5rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    margin-bottom: 0.5rem;
+  }
+  .hero h1 .accent { color: var(--accent); }
+  .hero p {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    max-width: 600px;
+  }
+  .hero-meta {
+    display: flex;
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+  }
+  .hero-meta span {
+    color: var(--text-muted);
+    padding: 0.25rem 0.6rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+
+  /* Sections */
+  section { margin-bottom: 3rem; }
+  section h2 {
+    font-family: var(--mono);
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: -0.01em;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.25rem;
+    margin-bottom: 0.75rem;
+    transition: border-color 0.15s;
+  }
+  .card:hover { border-color: var(--accent-dim); }
+  .card h3 {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    font-weight: 500;
+    margin-bottom: 0.4rem;
+  }
+  .card p { color: var(--text-muted); font-size: 0.9rem; }
+
+  /* Code blocks */
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem 1.25rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.7;
+    margin-bottom: 1rem;
+    color: var(--text);
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    background: var(--surface-raised);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+  }
+  pre code { background: none; padding: 0; }
+  .kw { color: var(--accent); }
+  .str { color: var(--green); }
+  .cmt { color: var(--text-muted); }
+  .fn { color: var(--yellow); }
+
+  /* API Tester */
+  .tester {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 0.75rem;
+  }
+  .tester-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .tester-row:last-child { border-bottom: none; }
+  .tester-row:hover { background: var(--surface-raised); }
+  .method {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    min-width: 55px;
+    text-align: center;
+  }
+  .method-get { background: var(--green-dim); color: var(--green); }
+  .method-post { background: var(--accent-dim); color: var(--accent); }
+  .method-del { background: #3d1f1f; color: var(--red); }
+  .tester-path {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    flex: 1;
+  }
+  .tester-desc {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+  .tester-go {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    background: var(--accent-dim);
+    border: none;
+    padding: 0.25rem 0.6rem;
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tester-go:hover { background: var(--accent); color: var(--bg); }
+
+  /* Response panel */
+  .response-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    display: none;
+    margin-bottom: 1.5rem;
+  }
+  .response-panel.active { display: block; }
+  .response-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    background: var(--surface-raised);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+  }
+  .response-status { font-weight: 700; }
+  .status-2xx { color: var(--green); }
+  .status-4xx { color: var(--yellow); }
+  .status-5xx { color: var(--red); }
+  .response-body {
+    padding: 1rem 1.25rem;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .response-headers-list {
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.8;
+    display: none;
+  }
+  .response-headers-list.show { display: block; }
+  .toggle-headers {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-family: var(--mono);
+  }
+  .toggle-headers:hover { color: var(--accent); }
+
+  /* Module grid */
+  .modules { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  @media (max-width: 640px) { .modules { grid-template-columns: 1fr; } }
+
+  /* Conventions */
+  .conv {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .conv:last-child { border-bottom: none; }
+  .conv-id {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-dim);
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    margin-top: 0.15rem;
+  }
+  .conv-text { font-size: 0.9rem; }
+  .conv-text strong { color: var(--text); }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 2rem 0;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand">runko<span>.New()</span></div>
+  <div class="topbar-status">{{.ServiceName}} · :{{.Port}}</div>
+</div>
+
+<div class="container">
+
+  <div class="hero">
+    <h1>Runko<span class="accent">GO</span></h1>
+    <p>Zero-dependency Go framework for scalable web apps and microservice clusters. This scaffold is your binary — everything you see ships inside it.</p>
+    <div class="hero-meta">
+      <span>go {{.GoVersion}}</span>
+      <span>0 deps</span>
+      <span>{{.BinarySize}}</span>
+      <span>{{.FileCount}} files</span>
+    </div>
+  </div>
+
+  <!-- LIVE API TESTER -->
+  <section>
+    <h2>// try it — live API tester</h2>
+    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+      Click any endpoint to fire a real request against this running instance.
+    </p>
+
+    <div class="tester">
+      <div class="tester-row" onclick="apiCall('GET', '/healthz')">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/healthz</span>
+        <span class="tester-desc">Liveness check</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('GET', '/readyz')">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/readyz</span>
+        <span class="tester-desc">Readiness check</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users', true)">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">List users (authed)</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users/1', true)">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users/1</span>
+        <span class="tester-desc">Get user by ID</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('POST', '/api/v1/users', true, JSON.stringify({name:'RunkoGO User',email:'runko@example.com'}))">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">Create user</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users', false)">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">No auth → 401</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users/999', true)">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users/999</span>
+        <span class="tester-desc">Not found → 404</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('DELETE', '/api/v1/users/1', true)">
+        <span class="method method-del">DEL</span>
+        <span class="tester-path">/api/v1/users/1</span>
+        <span class="tester-desc">Delete user → 204</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="apiCall('POST', '/api/v1/users', true, JSON.stringify({name:'Duplicate',email:'demo@example.com'}))">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">Duplicate email → 409</span>
+        <button class="tester-go">run →</button>
+      </div>
+    </div>
+
+    <div class="response-panel" id="response">
+      <div class="response-header">
+        <span class="response-status" id="resp-status"></span>
+        <span id="resp-time" style="color:var(--text-muted)"></span>
+        <button class="toggle-headers" onclick="toggleHeaders()">headers ▾</button>
+      </div>
+      <div class="response-body" id="resp-body"></div>
+      <div class="response-headers-list" id="resp-headers"></div>
+    </div>
+  </section>
+
+  <!-- ARCHITECTURE -->
+  <section>
+    <h2>// framework modules</h2>
+    <div class="modules">
+      <div class="card">
+        <h3>app.go</h3>
+        <p>Lifecycle: startup hooks → serve → signal → drain → shutdown hooks. TLS support, HOST/PORT config, port validation.</p>
+      </div>
+      <div class="card">
+        <h3>router.go</h3>
+        <p>Go 1.22 ServeMux with route groups and middleware chains. <code>app.Router.Group("/api", auth)</code></p>
+      </div>
+      <div class="card">
+        <h3>middleware.go</h3>
+        <p>Recovery, body limit, request ID, client IP, logger with query redaction, CORS, rate limiting.</p>
+      </div>
+      <div class="card">
+        <h3>security.go</h3>
+        <p>Security headers: nosniff, frame deny, cache-control, permissions policy, optional HSTS.</p>
+      </div>
+      <div class="card">
+        <h3>proxy.go</h3>
+        <p>Trusted proxy resolver. Right-to-left XFF walking. Secure by default — headers ignored without config.</p>
+      </div>
+      <div class="card">
+        <h3>client.go</h3>
+        <p>Service-to-service HTTP with retries, exponential backoff, circuit breaker, header propagation.</p>
+      </div>
+      <div class="card">
+        <h3>response.go</h3>
+        <p>JSON, errors, pagination, body decoding with trailing data check and size limits.</p>
+      </div>
+      <div class="card">
+        <h3>config.go</h3>
+        <p>Typed env vars: <code>MustGet</code>, <code>GetInt</code>, <code>GetBool</code>, <code>GetDuration</code>, <code>GetSlice</code>. Fail fast.</p>
+      </div>
+      <div class="card">
+        <h3>context.go</h3>
+        <p>Request-scoped values: request ID, client IP, user ID, trace ID. Flows through every function call.</p>
+      </div>
+      <div class="card">
+        <h3>sanitize.go</h3>
+        <p>Input sanitization. External IDs validated: <code>[a-zA-Z0-9_-]</code> max 64 chars. Rejects injection attempts.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- QUICK START CODE -->
+  <section>
+    <h2>// quick start</h2>
+<pre><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+    <span class="str">"time"</span>
+    runko <span class="str">"github.com/kallioinnovations/runkogo"</span>
+)
+
+<span class="kw">func</span> <span class="fn">main</span>() {
+    app := runko.<span class="fn">New</span>(runko.Options{
+        ServiceName: <span class="str">"my-service"</span>,
+    })
+
+    <span class="cmt">// Global middleware — applied to every request.</span>
+    app.Router.<span class="fn">Use</span>(
+        runko.<span class="fn">Recovery</span>(app.Logger),
+        runko.<span class="fn">BodyLimit</span>(1&lt;&lt;20),
+        runko.<span class="fn">DefaultSecurityHeaders</span>(),
+        runko.<span class="fn">RequestIDMiddleware</span>(),
+        runko.<span class="fn">ClientIPMiddleware</span>(app.Proxy),
+        runko.<span class="fn">Logger</span>(app.Logger),
+    )
+
+    <span class="cmt">// Routes.</span>
+    app.Router.<span class="fn">HandleFunc</span>(<span class="str">"GET /hello"</span>, <span class="kw">func</span>(w, r) {
+        runko.<span class="fn">JSON</span>(w, 200, runko.Map{<span class="str">"msg"</span>: <span class="str">"hello"</span>})
+    })
+
+    <span class="cmt">// Protected group.</span>
+    api := app.Router.<span class="fn">Group</span>(<span class="str">"/api/v1"</span>, authMiddleware)
+    api.<span class="fn">HandleFunc</span>(<span class="str">"GET /users/{id}"</span>, getUser)
+
+    app.<span class="fn">Run</span>() <span class="cmt">// Blocks until SIGINT/SIGTERM.</span>
+}</pre>
+  </section>
+
+  <!-- SECURITY CONVENTIONS -->
+  <section>
+    <h2>// security conventions</h2>
+    <div class="conv">
+      <span class="conv-id">CONV-01</span>
+      <div class="conv-text"><strong>Secure by default.</strong> X-Forwarded-For ignored unless TrustedProxies configured. CORS denied unless origins listed.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-02</span>
+      <div class="conv-text"><strong>Sanitize external input.</strong> Request IDs validated: <code>[a-zA-Z0-9_-]</code> max 64 chars. Injection attempts silently replaced.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-03</span>
+      <div class="conv-text"><strong>No internal details exposed.</strong> Health checks show pass/fail only. Error messages never contain hostnames or connection strings.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-04</span>
+      <div class="conv-text"><strong>Security headers on every response.</strong> nosniff, frame deny, cache-control, permissions-policy. Inspect any response above.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-05</span>
+      <div class="conv-text"><strong>Fail fast on danger.</strong> CORS wildcard + credentials → panic. Invalid proxy CIDR → panic. Partial TLS config → panic.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-06</span>
+      <div class="conv-text"><strong>Bounded resources.</strong> Body: 1MB. Rate limiter: 10K clients. Service responses: 10MB. Request IDs: 64 chars.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-07</span>
+      <div class="conv-text"><strong>Timeout everything.</strong> Server read/write/idle timeouts. Per-request service client timeout. Per-check health timeouts.</div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-08</span>
+      <div class="conv-text"><strong>Audit trail.</strong> Every request logged: method, path, status, duration, request ID, resolved client IP.</div>
+    </div>
+  </section>
+
+  <!-- DEPLOYMENT -->
+  <section>
+    <h2>// deploy</h2>
+<pre><span class="cmt"># Docker (multi-stage, scratch base)</span>
+FROM golang:1.22-alpine AS build
+WORKDIR /app
+COPY . .
+RUN CGO_ENABLED=0 go build -o /service .
+
+FROM scratch
+COPY --from=build /service /service
+EXPOSE 19100
+ENTRYPOINT ["/service"]
+
+<span class="cmt"># Result: ~8MB container, starts in milliseconds</span></pre>
+
+<pre><span class="cmt"># Environment variables</span>
+PORT=19100          <span class="cmt"># Server port (default: 19100)</span>
+HOST=0.0.0.0        <span class="cmt"># Bind address (default: 0.0.0.0)</span>
+LOG_LEVEL=info       <span class="cmt"># debug, info, warn, error</span>
+HEALTH_DETAIL=false  <span class="cmt"># Show error details in /readyz</span></pre>
+  </section>
+
+  <footer>
+    RunkoGO — built by <a href="https://kallioinnovations.fi">KallioInnovations Oy</a><br>
+    <span style="font-family:var(--mono); font-size:0.8rem; color:var(--text-muted)">
+      runko (Finnish) — frame, skeleton, chassis
+    </span>
+  </footer>
+
+</div>
+
+<script>
+async function apiCall(method, path, auth, body) {
+  const panel = document.getElementById('response');
+  const statusEl = document.getElementById('resp-status');
+  const bodyEl = document.getElementById('resp-body');
+  const timeEl = document.getElementById('resp-time');
+  const headersEl = document.getElementById('resp-headers');
+
+  panel.classList.add('active');
+  bodyEl.textContent = 'Loading...';
+  statusEl.textContent = '';
+  statusEl.className = 'response-status';
+  timeEl.textContent = '';
+  headersEl.textContent = '';
+  headersEl.classList.remove('show');
+
+  const headers = {};
+  if (auth) headers['Authorization'] = 'Bearer demo-key';
+  if (body) headers['Content-Type'] = 'application/json';
+
+  const start = performance.now();
+  try {
+    const resp = await fetch(path, { method, headers, body: body || undefined });
+    const elapsed = (performance.now() - start).toFixed(1);
+
+    const statusCode = resp.status;
+    statusEl.textContent = method + ' ' + path + ' → ' + statusCode;
+    if (statusCode < 300) statusEl.classList.add('status-2xx');
+    else if (statusCode < 500) statusEl.classList.add('status-4xx');
+    else statusEl.classList.add('status-5xx');
+
+    timeEl.textContent = elapsed + 'ms';
+
+    const text = await resp.text();
+    try {
+      bodyEl.textContent = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      bodyEl.textContent = text;
+    }
+
+    let headerLines = [];
+    resp.headers.forEach((v, k) => { headerLines.push(k + ': ' + v); });
+    headersEl.textContent = headerLines.join('\n');
+
+  } catch (err) {
+    statusEl.textContent = 'ERROR';
+    statusEl.classList.add('status-5xx');
+    bodyEl.textContent = err.message;
+  }
+
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function toggleHeaders() {
+  document.getElementById('resp-headers').classList.toggle('show');
+}
+</script>
+</body>
+</html>
