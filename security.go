@@ -36,6 +36,13 @@ type SecurityHeadersConfig struct {
 	// PermissionsPolicy restricts browser features.
 	// Default: "camera=(), microphone=(), geolocation=()".
 	PermissionsPolicy string
+
+	// ContentSecurityPolicy sets the Content-Security-Policy header.
+	// No default is set because this is an API-first framework and
+	// a default CSP would break most use cases. Set this when your
+	// application serves HTML pages.
+	// Example: "default-src 'self'; script-src 'self'"
+	ContentSecurityPolicy string
 }
 
 // SecurityHeaders returns a middleware that sets standard security
@@ -89,6 +96,9 @@ func SecurityHeaders(cfg SecurityHeadersConfig) Middleware {
 			if cfg.HSTS {
 				w.Header().Set("Strict-Transport-Security",
 					fmt.Sprintf("max-age=%d; includeSubDomains", cfg.HSTSMaxAge))
+			}
+			if cfg.ContentSecurityPolicy != "" {
+				w.Header().Set("Content-Security-Policy", cfg.ContentSecurityPolicy)
 			}
 
 			next.ServeHTTP(w, r)

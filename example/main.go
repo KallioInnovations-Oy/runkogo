@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -212,7 +213,9 @@ func simpleAuth(cfg *runko.ConfigLoader, logger *slog.Logger) runko.Middleware {
 				key = r.URL.Query().Get("api_key")
 			}
 
-			if key != "Bearer "+apiKey && key != apiKey {
+			bearerMatch := subtle.ConstantTimeCompare([]byte(key), []byte("Bearer "+apiKey)) == 1
+			rawMatch := subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) == 1
+			if !bearerMatch && !rawMatch {
 				logger.Warn("unauthorized request",
 					"path", r.URL.Path,
 					"request_id", runko.RequestID(r.Context()),

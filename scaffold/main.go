@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"errors"
 	"fmt"
@@ -60,7 +61,9 @@ type Handlers struct {
 // Index serves the embedded HTML UI.
 func (h *Handlers) Index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	h.tmpl.Execute(w, h.data)
+	if err := h.tmpl.Execute(w, h.data); err != nil {
+		h.logger.Error("template execution failed", "error", err)
+	}
 }
 
 // ListUsers returns all users with pagination.
@@ -153,9 +156,10 @@ func (h *Handlers) DeleteUser(w http.ResponseWriter, r *http.Request) {
 // ==========================================================================
 
 func demoAuth(next http.Handler) http.Handler {
+	expected := []byte("Bearer demo-key")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Authorization")
-		if key != "Bearer demo-key" {
+		if subtle.ConstantTimeCompare([]byte(key), expected) != 1 {
 			runko.Error(w, http.StatusUnauthorized, "unauthorized", "Send header: Authorization: Bearer demo-key")
 			return
 		}

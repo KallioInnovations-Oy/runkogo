@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/signal"
 	"strconv"
@@ -121,9 +122,16 @@ func New(opts Options) *App {
 
 	// Validate TLS config: both or neither must be set. (CONV-05)
 	if (opts.TLSCert == "") != (opts.TLSKey == "") {
+		certStatus, keyStatus := "<set>", "<set>"
+		if opts.TLSCert == "" {
+			certStatus = "<empty>"
+		}
+		if opts.TLSKey == "" {
+			keyStatus = "<empty>"
+		}
 		panic("runko: TLS misconfiguration — both TLSCert and TLSKey must " +
-			"be set, or both must be empty. Got TLSCert=" + opts.TLSCert +
-			" TLSKey=" + opts.TLSKey)
+			"be set, or both must be empty. Got TLSCert=" + certStatus +
+			" TLSKey=" + keyStatus)
 	}
 
 	logger := newLogger(opts.ServiceName, opts.LogLevel)
@@ -224,13 +232,20 @@ func (a *App) Run() error {
 	a.Router.Handle("GET /healthz", a.livenessHandler())
 	a.Router.Handle("GET /readyz", a.readinessHandler())
 
+	// Bind the port first, before starting the server goroutine.
+	// This ensures the port is actually available before marking ready.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
 	// Configure HTTP server.
 	a.server = &http.Server{
-		Addr:         addr,
-		Handler:      a.Router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Handler:           a.Router,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Start server in background.
@@ -241,13 +256,13 @@ func (a *App) Run() error {
 		if useTLS {
 			proto = "https"
 		}
-		a.Logger.Info("server starting", "addr", addr, "proto", proto)
+		a.Logger.Info("server starting", "addr", ln.Addr().String(), "proto", proto)
 
 		var err error
 		if useTLS {
-			err = a.server.ListenAndServeTLS(a.tlsCert, a.tlsKey)
+			err = a.server.ServeTLS(ln, a.tlsCert, a.tlsKey)
 		} else {
-			err = a.server.ListenAndServe()
+			err = a.server.Serve(ln)
 		}
 		if err != nil && err != http.ErrServerClosed {
 			serverErr <- err
@@ -255,12 +270,12 @@ func (a *App) Run() error {
 		close(serverErr)
 	}()
 
-	// Mark as ready.
+	// Mark as ready — the port is bound, the server is accepting.
 	a.health.mu.Lock()
 	a.health.ready = true
 	a.health.mu.Unlock()
 
-	a.Logger.Info("service ready")
+	a.Logger.Info("service ready", "addr", ln.Addr().String())
 
 	// Block until signal or server error.
 	select {

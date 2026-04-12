@@ -199,10 +199,11 @@ type statusWriter struct {
 }
 
 func (sw *statusWriter) WriteHeader(code int) {
-	if !sw.written {
-		sw.statusCode = code
-		sw.written = true
+	if sw.written {
+		return
 	}
+	sw.statusCode = code
+	sw.written = true
 	sw.ResponseWriter.WriteHeader(code)
 }
 
@@ -285,6 +286,12 @@ func CORS(cfg CORSConfig) Middleware {
 	headers := strings.Join(cfg.AllowedHeaders, ", ")
 	maxAge := fmt.Sprintf("%d", cfg.MaxAge)
 
+	// Build a set for fast preflight method validation.
+	allowedMethodSet := make(map[string]bool, len(cfg.AllowedMethods))
+	for _, m := range cfg.AllowedMethods {
+		allowedMethodSet[m] = true
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -321,6 +328,18 @@ func CORS(cfg CORSConfig) Middleware {
 
 			// Handle preflight.
 			if r.Method == http.MethodOptions {
+				// Validate the requested method against allowed methods.
+				// If the preflight asks for a method we don't allow,
+				// skip CORS headers so the browser blocks the real request.
+				if reqMethod := r.Header.Get("Access-Control-Request-Method"); reqMethod != "" {
+					if !allowedMethodSet[reqMethod] {
+						w.Header().Del("Access-Control-Allow-Origin")
+						w.Header().Del("Access-Control-Allow-Methods")
+						w.Header().Del("Access-Control-Allow-Headers")
+						w.Header().Del("Access-Control-Max-Age")
+						w.Header().Del("Access-Control-Allow-Credentials")
+					}
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -383,22 +402,7 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 
 	var mu sync.Mutex
 	clients := make(map[string]*client)
-
-	// Cleanup old entries periodically.
-	go func() {
-		ticker := time.NewTicker(cfg.Window)
-		defer ticker.Stop()
-		for range ticker.C {
-			mu.Lock()
-			now := time.Now()
-			for ip, c := range clients {
-				if now.Sub(c.windowStart) > cfg.Window {
-					delete(clients, ip)
-				}
-			}
-			mu.Unlock()
-		}
-	}()
+	lastCleanup := time.Now()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -411,6 +415,18 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 
 			mu.Lock()
 			now := time.Now()
+
+			// Inline cleanup: purge expired entries periodically.
+			// Replaces a background goroutine to avoid goroutine leaks.
+			if now.Sub(lastCleanup) > cfg.Window {
+				for clientIP, entry := range clients {
+					if now.Sub(entry.windowStart) > cfg.Window {
+						delete(clients, clientIP)
+					}
+				}
+				lastCleanup = now
+			}
+
 			c, exists := clients[ip]
 			if !exists || now.Sub(c.windowStart) > cfg.Window {
 				// Check map capacity before adding new entry. (CONV-06)

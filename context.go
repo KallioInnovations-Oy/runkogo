@@ -105,6 +105,8 @@ func TraceIDFromHeader(r *http.Request) string {
 // Uses crypto/rand for uniqueness without external dependencies.
 func generateID() string {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("runko: crypto/rand.Read failed: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

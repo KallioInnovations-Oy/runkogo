@@ -3,6 +3,7 @@ package runko
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 )
 
@@ -19,7 +20,9 @@ func JSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if data != nil {
-		_ = json.NewEncoder(w).Encode(data)
+		if err := json.NewEncoder(w).Encode(data); err != nil {
+			slog.Default().Error("runko: failed to encode JSON response", "error", err)
+		}
 	}
 }
 
@@ -95,6 +98,9 @@ type PaginationMeta struct {
 
 // Paginated writes a paginated JSON response.
 func Paginated(w http.ResponseWriter, data any, page, perPage, total int) {
+	if perPage <= 0 {
+		perPage = 1
+	}
 	totalPages := total / perPage
 	if total%perPage != 0 {
 		totalPages++

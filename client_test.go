@@ -1,6 +1,12 @@
 package runko
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,5 +113,122 @@ func TestCircuitBreaker_HalfOpen_FailureReopens(t *testing.T) {
 
 	if cb.allow() {
 		t.Error("circuit breaker should reopen after failed probe")
+	}
+}
+
+// FIX-02: POST should not be retried on 5xx by default.
+func TestDo_POST_NoRetryByDefault(t *testing.T) {
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    2 * time.Second,
+		MaxRetries: 3,
+		RetryDelay: 10 * time.Millisecond,
+	})
+
+	_, err := sc.Post(context.Background(), "/test", map[string]string{"key": "val"})
+	if err == nil {
+		t.Fatal("expected error from POST to 500 endpoint")
+	}
+
+	if got := count.Load(); got != 1 {
+		t.Errorf("POST should not retry by default: got %d attempts, want 1", got)
+	}
+}
+
+// FIX-02: GET should still be retried on 5xx.
+func TestDo_GET_RetriesOn5xx(t *testing.T) {
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := count.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    2 * time.Second,
+		MaxRetries: 3,
+		RetryDelay: 10 * time.Millisecond,
+	})
+
+	resp, err := sc.Get(context.Background(), "/test")
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := count.Load(); got != 3 {
+		t.Errorf("GET should retry on 5xx: got %d attempts, want 3", got)
+	}
+}
+
+// FIX-02: POST retries when opt-in via RetryNonIdempotent.
+func TestDo_POST_RetriesWhenOptIn(t *testing.T) {
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := count.Add(1)
+		if n <= 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL:            srv.URL,
+		Timeout:            2 * time.Second,
+		MaxRetries:         3,
+		RetryDelay:         10 * time.Millisecond,
+		RetryNonIdempotent: true,
+	})
+
+	resp, err := sc.Post(context.Background(), "/test", map[string]string{"key": "val"})
+	if err != nil {
+		t.Fatalf("expected success with RetryNonIdempotent, got: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := count.Load(); got != 2 {
+		t.Errorf("POST with RetryNonIdempotent should retry: got %d attempts, want 2", got)
+	}
+}
+
+// FIX-05: Response body should be limited by MaxResponseSize.
+func TestDo_ResponseBodyLimited(t *testing.T) {
+	// Server sends 2KB body.
+	bigBody := strings.Repeat("x", 2048)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(bigBody))
+	}))
+	defer srv.Close()
+
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL:         srv.URL,
+		Timeout:         2 * time.Second,
+		MaxResponseSize: 1024, // Limit to 1KB.
+	})
+
+	resp, err := sc.Get(context.Background(), "/test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if len(data) > 1024 {
+		t.Errorf("response body should be limited to 1024 bytes, got %d", len(data))
 	}
 }

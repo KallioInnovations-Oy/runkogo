@@ -15,13 +15,14 @@ import (
 // It provides automatic retries, circuit breaking, timeout enforcement,
 // and request ID propagation across service boundaries.
 type ServiceClient struct {
-	client          *http.Client
-	baseURL         string
-	defaultTimeout  time.Duration
-	maxRetries      int
-	retryDelay      time.Duration
-	maxResponseSize int64
-	circuit         *circuitBreaker
+	client             *http.Client
+	baseURL            string
+	defaultTimeout     time.Duration
+	maxRetries         int
+	retryDelay         time.Duration
+	maxResponseSize    int64
+	retryNonIdempotent bool
+	circuit            *circuitBreaker
 }
 
 // ServiceClientConfig configures a ServiceClient.
@@ -48,10 +49,18 @@ type ServiceClientConfig struct {
 	// the circuit opens. Defaults to 30 seconds.
 	CircuitCooldown time.Duration
 
-	// MaxResponseSize is the maximum response body size in bytes that
-	// GetJSON will read. Prevents OOM from malicious or buggy
-	// downstream services. Default: 10MB. (CONV-06)
+	// MaxResponseSize is the maximum response body size in bytes.
+	// Applied to all responses (including raw Get/Post/Put/Delete)
+	// to prevent OOM from malicious or buggy downstream services.
+	// Default: 10MB. (CONV-06)
 	MaxResponseSize int64
+
+	// RetryNonIdempotent controls whether non-idempotent methods
+	// (POST, PATCH) are retried on 5xx responses. Default: false
+	// (only idempotent methods per RFC 9110 are retried). Set to
+	// true if your POST endpoints are designed to be idempotent
+	// (e.g., with idempotency keys).
+	RetryNonIdempotent bool
 }
 
 // NewServiceClient creates a new HTTP client for calling another service.
@@ -79,12 +88,13 @@ func NewServiceClient(cfg ServiceClientConfig) *ServiceClient {
 		client: &http.Client{
 			Timeout: cfg.Timeout,
 		},
-		baseURL:         strings.TrimRight(cfg.BaseURL, "/"),
-		defaultTimeout:  cfg.Timeout,
-		maxRetries:      cfg.MaxRetries,
-		retryDelay:      cfg.RetryDelay,
-		maxResponseSize: cfg.MaxResponseSize,
-		circuit:         newCircuitBreaker(cfg.CircuitThreshold, cfg.CircuitCooldown),
+		baseURL:            strings.TrimRight(cfg.BaseURL, "/"),
+		defaultTimeout:     cfg.Timeout,
+		maxRetries:         cfg.MaxRetries,
+		retryDelay:         cfg.RetryDelay,
+		maxResponseSize:    cfg.MaxResponseSize,
+		retryNonIdempotent: cfg.RetryNonIdempotent,
+		circuit:            newCircuitBreaker(cfg.CircuitThreshold, cfg.CircuitCooldown),
 	}
 }
 
@@ -124,9 +134,8 @@ func (sc *ServiceClient) GetJSON(ctx context.Context, path string, target any) e
 		return fmt.Errorf("service returned %d", resp.StatusCode)
 	}
 
-	// Limit response body to prevent OOM. (CONV-06)
-	limited := io.LimitReader(resp.Body, sc.maxResponseSize)
-	return json.NewDecoder(limited).Decode(target)
+	// Body is already limited to MaxResponseSize by do(). (CONV-06)
+	return json.NewDecoder(resp.Body).Decode(target)
 }
 
 // do executes the HTTP request with retries and circuit breaking.
@@ -188,10 +197,18 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 			resp.Body.Close()
 			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
 			sc.circuit.recordFailure()
+			// Only retry idempotent methods by default. Non-idempotent
+			// methods (POST, PATCH) could cause duplicate side effects.
+			if !isIdempotent(method) && !sc.retryNonIdempotent {
+				break
+			}
 			continue
 		}
 
 		sc.circuit.recordSuccess()
+		// Limit response body to prevent OOM from malicious or
+		// buggy downstream services. (CONV-06)
+		resp.Body = newLimitedReadCloser(resp.Body, sc.maxResponseSize)
 		return resp, nil
 	}
 
@@ -264,4 +281,33 @@ func (cb *circuitBreaker) recordFailure() {
 	if cb.failures >= cb.threshold {
 		cb.state = "open"
 	}
+}
+
+// isIdempotent returns true if the HTTP method is idempotent per RFC 9110.
+func isIdempotent(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+// limitedReadCloser wraps a response body with a size limit to prevent
+// OOM from malicious or buggy downstream services. (CONV-06)
+type limitedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func newLimitedReadCloser(body io.ReadCloser, limit int64) *limitedReadCloser {
+	return &limitedReadCloser{
+		Reader: io.LimitReader(body, limit),
+		closer: body,
+	}
+}
+
+func (l *limitedReadCloser) Close() error {
+	return l.closer.Close()
 }

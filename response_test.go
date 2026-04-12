@@ -169,3 +169,30 @@ func TestPaginated_LastPage(t *testing.T) {
 		t.Error("has_more should be false on the last page")
 	}
 }
+
+// FIX-04: Paginated should not panic with perPage <= 0.
+func TestPaginated_ZeroPerPage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	// Should not panic — perPage=0 is guarded.
+	Paginated(rec, []string{"a"}, 1, 0, 5)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+
+	var result PaginatedResponse
+	json.NewDecoder(rec.Body).Decode(&result)
+	if result.Pagination.PerPage != 1 {
+		t.Errorf("per_page = %d, want 1 (safe fallback)", result.Pagination.PerPage)
+	}
+}
+
+func TestPaginated_NegativePerPage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	// Should not panic — negative perPage is guarded.
+	Paginated(rec, []string{"a"}, 1, -5, 10)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}

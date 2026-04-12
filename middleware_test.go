@@ -473,3 +473,114 @@ func TestRequestIDMiddleware_InvalidTraceIDDropped(t *testing.T) {
 		t.Errorf("invalid trace ID should be dropped, got %q", capturedTraceID)
 	}
 }
+
+// FIX-07: statusWriter should not forward duplicate WriteHeader calls.
+func TestStatusWriter_NoDuplicateWriteHeader(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: rec, statusCode: http.StatusOK}
+
+	sw.WriteHeader(http.StatusCreated)
+	sw.WriteHeader(http.StatusInternalServerError) // should be ignored
+
+	if sw.statusCode != http.StatusCreated {
+		t.Errorf("statusCode = %d, want %d", sw.statusCode, http.StatusCreated)
+	}
+	// The underlying recorder should only have received the first call.
+	if rec.Code != http.StatusCreated {
+		t.Errorf("recorder code = %d, want %d", rec.Code, http.StatusCreated)
+	}
+}
+
+// FIX-08: Rate limiter should clean up expired entries inline.
+func TestRateLimit_CleansUpExpiredEntries(t *testing.T) {
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 100,
+		Window:            50 * time.Millisecond,
+		MaxClients:        2,
+	})(nopHandler)
+
+	// Fill up 2 client slots.
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = strings.Replace("X.0.0.1:1234", "X", string(rune('1'+i)), 1)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("client %d: status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	// 3rd client should be rejected (map full).
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("overflow before cleanup: status = %d, want 429", rec.Code)
+	}
+
+	// Wait for the window to expire.
+	time.Sleep(60 * time.Millisecond)
+
+	// Now the inline cleanup should free slots, allowing the 3rd client.
+	req = httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("after cleanup: status = %d, want 200", rec.Code)
+	}
+}
+
+// FIX-10: CORS preflight should reject disallowed methods.
+func TestCORS_PreflightInvalidMethod(t *testing.T) {
+	handler := CORS(CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+		AllowedMethods: []string{"GET", "POST"},
+	})(nopHandler)
+
+	req := httptest.NewRequest("OPTIONS", "/api/test", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "DELETE")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("preflight status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	// CORS headers should have been removed for disallowed method.
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Allow-Origin should be empty for disallowed method, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "" {
+		t.Errorf("Allow-Methods should be empty for disallowed method, got %q", got)
+	}
+}
+
+// FIX-14: SecurityHeaders should set CSP when configured.
+func TestSecurityHeaders_WithCSP(t *testing.T) {
+	handler := SecurityHeaders(SecurityHeadersConfig{
+		ContentSecurityPolicy: "default-src 'self'",
+	})(nopHandler)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'self'" {
+		t.Errorf("CSP = %q, want %q", got, "default-src 'self'")
+	}
+}
+
+// FIX-14: SecurityHeaders should NOT set CSP by default.
+func TestSecurityHeaders_NoCSPByDefault(t *testing.T) {
+	handler := DefaultSecurityHeaders()(nopHandler)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Content-Security-Policy"); got != "" {
+		t.Errorf("CSP should not be set by default, got %q", got)
+	}
+}
