@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -140,6 +141,11 @@ func (sc *ServiceClient) GetJSON(ctx context.Context, path string, target any) e
 
 // do executes the HTTP request with retries and circuit breaking.
 func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	// Validate path starts with "/" to prevent URL manipulation.
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("path must start with \"/\", got %q", path)
+	}
+
 	// Check circuit breaker.
 	if !sc.circuit.allow() {
 		return nil, fmt.Errorf("circuit breaker open for %s", sc.baseURL)
@@ -150,8 +156,9 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 	var lastErr error
 	for attempt := 0; attempt <= sc.maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff.
-			delay := sc.retryDelay * time.Duration(1<<(attempt-1))
+			// Exponential backoff with jitter to prevent thundering herd.
+			base := sc.retryDelay * time.Duration(1<<(attempt-1))
+			delay := base/2 + time.Duration(rand.Int64N(int64(base/2+1)))
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():

@@ -55,6 +55,21 @@ func (rw *recoveryWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Flush passes through to the underlying writer for SSE support.
+func (rw *recoveryWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack passes through to the underlying writer for WebSocket support.
+func (rw *recoveryWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
+}
+
 // BodyLimit middleware restricts the maximum request body size for all
 // routes. This protects handlers that read r.Body directly without
 // using Decode(). The limit applies to all HTTP methods. (CONV-06)
@@ -318,9 +333,6 @@ func CORS(cfg CORSConfig) Middleware {
 
 			if matched != "" {
 				w.Header().Set("Access-Control-Allow-Origin", matched)
-				w.Header().Set("Access-Control-Allow-Methods", methods)
-				w.Header().Set("Access-Control-Allow-Headers", headers)
-				w.Header().Set("Access-Control-Max-Age", maxAge)
 				if cfg.AllowCredentials {
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
 				}
@@ -328,6 +340,18 @@ func CORS(cfg CORSConfig) Middleware {
 
 			// Handle preflight.
 			if r.Method == http.MethodOptions {
+				// Vary on preflight-specific headers to prevent CDN
+				// cache poisoning of preflight responses.
+				w.Header().Add("Vary", "Access-Control-Request-Method")
+				w.Header().Add("Vary", "Access-Control-Request-Headers")
+
+				// Set preflight-specific headers (not needed on regular responses).
+				if matched != "" {
+					w.Header().Set("Access-Control-Allow-Methods", methods)
+					w.Header().Set("Access-Control-Allow-Headers", headers)
+					w.Header().Set("Access-Control-Max-Age", maxAge)
+				}
+
 				// Validate the requested method against allowed methods.
 				// If the preflight asks for a method we don't allow,
 				// skip CORS headers so the browser blocks the real request.
@@ -417,14 +441,23 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 			now := time.Now()
 
 			// Inline cleanup: purge expired entries periodically.
-			// Replaces a background goroutine to avoid goroutine leaks.
+			// Capped to 500 entries per sweep to bound lock duration.
+			// Go's randomized map iteration ensures full coverage
+			// across multiple sweeps.
 			if now.Sub(lastCleanup) > cfg.Window {
+				count := 0
 				for clientIP, entry := range clients {
 					if now.Sub(entry.windowStart) > cfg.Window {
 						delete(clients, clientIP)
 					}
+					count++
+					if count >= 500 {
+						break
+					}
 				}
-				lastCleanup = now
+				if count < 500 {
+					lastCleanup = now // full sweep completed
+				}
 			}
 
 			c, exists := clients[ip]

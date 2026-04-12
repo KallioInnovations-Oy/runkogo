@@ -128,13 +128,18 @@ func (pr *proxyResolver) resolveClientIP(remoteAddr string, xForwardedFor string
 		if ips[i] == "" {
 			continue
 		}
+		// Validate that the entry is a real IP address.
+		// Skip garbage entries injected by malicious clients.
+		if net.ParseIP(ips[i]) == nil {
+			continue
+		}
 		if !pr.isTrusted(ips[i]) {
 			return ips[i]
 		}
 	}
 
 	// Entire chain is trusted infrastructure — return leftmost.
-	if len(ips) > 0 && ips[0] != "" {
+	if len(ips) > 0 && ips[0] != "" && net.ParseIP(ips[0]) != nil {
 		return ips[0]
 	}
 

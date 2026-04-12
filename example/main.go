@@ -209,9 +209,6 @@ func simpleAuth(cfg *runko.ConfigLoader, logger *slog.Logger) runko.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get("Authorization")
-			if key == "" {
-				key = r.URL.Query().Get("api_key")
-			}
 
 			bearerMatch := subtle.ConstantTimeCompare([]byte(key), []byte("Bearer "+apiKey)) == 1
 			rawMatch := subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) == 1

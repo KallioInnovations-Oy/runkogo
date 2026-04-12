@@ -270,6 +270,15 @@ func (a *App) Run() error {
 		close(serverErr)
 	}()
 
+	// Wait briefly for any immediate server startup errors (e.g., TLS
+	// misconfiguration) before marking as ready.
+	select {
+	case err := <-serverErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-time.After(50 * time.Millisecond):
+		// No immediate error — server is running.
+	}
+
 	// Mark as ready — the port is bound, the server is accepting.
 	a.health.mu.Lock()
 	a.health.ready = true
@@ -290,17 +299,22 @@ func (a *App) Run() error {
 	a.health.ready = false
 	a.health.mu.Unlock()
 
-	// Gracefully shut down HTTP server.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
-	defer cancel()
+	// Phase 1: Gracefully drain HTTP connections.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+	defer drainCancel()
 
-	if err := a.server.Shutdown(shutdownCtx); err != nil {
+	if err := a.server.Shutdown(drainCtx); err != nil {
 		a.Logger.Error("server shutdown error", "error", err)
 	}
 
-	// Run shutdown hooks.
+	// Phase 2: Run shutdown hooks with their own full timeout.
+	// This ensures hooks get adequate time even if HTTP drain
+	// consumed most of phase 1.
+	hookCtx, hookCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+	defer hookCancel()
+
 	for _, fn := range a.onShutdown {
-		if err := fn(shutdownCtx); err != nil {
+		if err := fn(hookCtx); err != nil {
 			a.Logger.Error("shutdown hook error", "error", err)
 		}
 	}

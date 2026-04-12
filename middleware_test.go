@@ -1,6 +1,7 @@
 package runko
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -554,6 +555,164 @@ func TestCORS_PreflightInvalidMethod(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "" {
 		t.Errorf("Allow-Methods should be empty for disallowed method, got %q", got)
+	}
+}
+
+// AUDIT3-01: recoveryWriter should implement http.Flusher for SSE support.
+func TestRecoveryWriter_ImplementsFlusher(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &recoveryWriter{ResponseWriter: rec}
+
+	// httptest.ResponseRecorder implements Flusher.
+	rw.Flush()
+
+	if !rec.Flushed {
+		t.Error("recoveryWriter.Flush should pass through to underlying ResponseWriter")
+	}
+}
+
+// AUDIT3-01: recoveryWriter should implement http.Hijacker passthrough.
+func TestRecoveryWriter_ImplementsHijacker(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &recoveryWriter{ResponseWriter: rec}
+
+	// httptest.ResponseRecorder does NOT implement Hijacker,
+	// so we expect the error path.
+	_, _, err := rw.Hijack()
+	if err == nil {
+		t.Error("Hijack should return error when underlying writer doesn't support it")
+	}
+}
+
+// AUDIT3-02: CORS should not set preflight-only headers on regular responses.
+func TestCORS_RegularRequest_NoPreflightHeaders(t *testing.T) {
+	handler := CORS(CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+	})(nopHandler)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Origin", "https://example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// Allow-Origin should be present on regular responses.
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "https://example.com")
+	}
+
+	// Preflight-only headers should NOT be present on regular responses.
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "" {
+		t.Errorf("Allow-Methods should not be set on regular response, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "" {
+		t.Errorf("Allow-Headers should not be set on regular response, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Max-Age"); got != "" {
+		t.Errorf("Max-Age should not be set on regular response, got %q", got)
+	}
+}
+
+// AUDIT3-02: CORS preflight should still include method/header/max-age headers.
+func TestCORS_Preflight_IncludesPreflightHeaders(t *testing.T) {
+	handler := CORS(CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+	})(nopHandler)
+
+	req := httptest.NewRequest("OPTIONS", "/api/test", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("Allow-Methods should be set on preflight response")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got == "" {
+		t.Error("Allow-Headers should be set on preflight response")
+	}
+	if got := rec.Header().Get("Access-Control-Max-Age"); got == "" {
+		t.Error("Max-Age should be set on preflight response")
+	}
+}
+
+// AUDIT3-03: CORS preflight should set Vary for preflight-specific headers.
+func TestCORS_Preflight_VaryHeaders(t *testing.T) {
+	handler := CORS(CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+	})(nopHandler)
+
+	req := httptest.NewRequest("OPTIONS", "/api/test", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	vary := strings.Join(rec.Header().Values("Vary"), ", ")
+
+	if !strings.Contains(vary, "Origin") {
+		t.Errorf("Vary should contain Origin, got %q", vary)
+	}
+	if !strings.Contains(vary, "Access-Control-Request-Method") {
+		t.Errorf("Vary should contain Access-Control-Request-Method, got %q", vary)
+	}
+	if !strings.Contains(vary, "Access-Control-Request-Headers") {
+		t.Errorf("Vary should contain Access-Control-Request-Headers, got %q", vary)
+	}
+}
+
+// AUDIT3-03: Regular responses should not have preflight Vary headers.
+func TestCORS_RegularRequest_NoPreflightVary(t *testing.T) {
+	handler := CORS(CORSConfig{
+		AllowedOrigins: []string{"https://example.com"},
+	})(nopHandler)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Origin", "https://example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	vary := strings.Join(rec.Header().Values("Vary"), ", ")
+
+	if !strings.Contains(vary, "Origin") {
+		t.Errorf("Vary should contain Origin, got %q", vary)
+	}
+	if strings.Contains(vary, "Access-Control-Request-Method") {
+		t.Errorf("Vary should NOT contain Access-Control-Request-Method on regular response, got %q", vary)
+	}
+}
+
+// AUDIT3-05: Rate limiter cleanup should be bounded.
+func TestRateLimit_CleanupBounded(t *testing.T) {
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 100,
+		Window:            50 * time.Millisecond,
+		MaxClients:        10000,
+	})(nopHandler)
+
+	// Fill many client slots.
+	for i := 0; i < 1000; i++ {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = fmt.Sprintf("10.0.%d.%d:1234", i/256, i%256)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+
+	// Wait for window to expire.
+	time.Sleep(60 * time.Millisecond)
+
+	// A single request should complete quickly (bounded cleanup).
+	start := time.Now()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	duration := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if duration > 100*time.Millisecond {
+		t.Errorf("cleanup took %v, expected much less", duration)
 	}
 }
 

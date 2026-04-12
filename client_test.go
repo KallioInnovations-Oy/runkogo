@@ -205,6 +205,67 @@ func TestDo_POST_RetriesWhenOptIn(t *testing.T) {
 	}
 }
 
+// AUDIT3-07: ServiceClient should reject paths not starting with "/".
+func TestServiceClient_PathValidation(t *testing.T) {
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL: "http://example.com",
+	})
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"valid path", "/api/users", false},
+		{"no leading slash", "api/users", true},
+		{"at-sign attack", "@evil.com/steal", true},
+		{"empty path", "", true},
+		{"root path", "/", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := sc.Get(context.Background(), tt.path)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "path must start with") {
+					t.Errorf("expected path validation error, got: %v", err)
+				}
+			}
+			// For valid paths, errors come from connection failure, not validation.
+		})
+	}
+}
+
+// AUDIT3-09: Retry backoff should include jitter.
+func TestRetryBackoff_HasJitter(t *testing.T) {
+	var timestamps []time.Time
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timestamps = append(timestamps, time.Now())
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sc := NewServiceClient(ServiceClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    2 * time.Second,
+		MaxRetries: 3,
+		RetryDelay: 100 * time.Millisecond,
+	})
+
+	sc.Get(context.Background(), "/test")
+
+	if len(timestamps) < 3 {
+		t.Fatalf("expected at least 3 attempts, got %d", len(timestamps))
+	}
+
+	// First retry delay should be roughly 50-100ms (jittered from 100ms base).
+	delay1 := timestamps[1].Sub(timestamps[0])
+	if delay1 < 30*time.Millisecond || delay1 > 150*time.Millisecond {
+		t.Errorf("first retry delay = %v, expected ~50-100ms (jittered)", delay1)
+	}
+}
+
 // FIX-05: Response body should be limited by MaxResponseSize.
 func TestDo_ResponseBodyLimited(t *testing.T) {
 	// Server sends 2KB body.

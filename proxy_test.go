@@ -171,6 +171,54 @@ func TestProxyResolver_IsTrusted(t *testing.T) {
 	}
 }
 
+// AUDIT3-06: Proxy resolver should skip invalid IPs in X-Forwarded-For.
+func TestProxyResolver_InvalidIPInXFF_Skipped(t *testing.T) {
+	pr := newProxyResolver([]string{"10.0.0.0/8"})
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		want       string
+	}{
+		{
+			"garbage in XFF is skipped, falls back to directIP",
+			"10.0.0.1:8080", "not-an-ip, 10.0.0.2",
+			"10.0.0.1",
+		},
+		{
+			"valid IP after garbage",
+			"10.0.0.1:8080", "203.0.113.50, not-an-ip, 10.0.0.2",
+			"203.0.113.50",
+		},
+		{
+			"script injection in XFF",
+			"10.0.0.1:8080", `"><script>alert(1)</script>`,
+			"10.0.0.1",
+		},
+		{
+			"mixed valid and invalid",
+			"10.0.0.1:8080", "garbage, 8.8.8.8, 10.0.0.5",
+			"8.8.8.8",
+		},
+		{
+			"all garbage falls back to directIP",
+			"10.0.0.1:8080", "foo, bar, baz",
+			"10.0.0.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pr.resolveClientIP(tt.remoteAddr, tt.xff)
+			if got != tt.want {
+				t.Errorf("resolveClientIP(%q, %q) = %q, want %q",
+					tt.remoteAddr, tt.xff, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxyResolver_InvalidEntry_Panics(t *testing.T) {
 	defer func() {
 		r := recover()
