@@ -11,11 +11,10 @@ import (
 	"time"
 )
 
-// Recovery middleware catches panics in downstream handlers and returns
-// a 500 error instead of crashing the entire server. If the response
-// has already been partially written when the panic occurs, Recovery
-// logs the error but does not attempt to write — the connection is
-// already corrupted and no clean error response is possible.
+// Recovery catches panics in downstream handlers and returns a 500.
+// If the response has already been partially written, Recovery logs the
+// panic but does not attempt to write — the connection is already
+// corrupted and no clean error response is possible.
 func Recovery(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +37,6 @@ func Recovery(logger *slog.Logger) Middleware {
 	}
 }
 
-// recoveryWriter tracks whether the response has started (headers or
-// body sent). Once started, Recovery cannot safely write an error.
 type recoveryWriter struct {
 	http.ResponseWriter
 	started bool
@@ -55,14 +52,12 @@ func (rw *recoveryWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
-// Flush passes through to the underlying writer for SSE support.
 func (rw *recoveryWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// Hijack passes through to the underlying writer for WebSocket support.
 func (rw *recoveryWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
 		return h.Hijack()
@@ -70,13 +65,8 @@ func (rw *recoveryWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
-// BodyLimit middleware restricts the maximum request body size for all
-// routes. This protects handlers that read r.Body directly without
-// using Decode(). The limit applies to all HTTP methods. (CONV-06)
-//
-// Default recommendation: 1MB for API services, higher for file uploads.
-// Handlers that need larger bodies can call DecodeWithLimit() which
-// overrides the per-request limit.
+// BodyLimit restricts the maximum request body size. Applies to all methods.
+// Handlers that need larger bodies can call DecodeWithLimit to override.
 func BodyLimit(maxBytes int64) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,12 +78,9 @@ func BodyLimit(maxBytes int64) Middleware {
 	}
 }
 
-// RequestIDMiddleware injects a request ID and trace ID into every
-// request's context and response headers. If the incoming request has
-// valid X-Request-ID or X-Trace-ID headers (from an upstream service
-// or load balancer), they are preserved. Otherwise a request ID is
-// generated. This completes the trace propagation loop: incoming
-// headers → context → ServiceClient outgoing headers → next service.
+// RequestIDMiddleware injects request and trace IDs into every request's
+// context and response headers. Preserves valid incoming X-Request-ID and
+// X-Trace-ID from upstream services; otherwise generates a request ID.
 func RequestIDMiddleware() Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +88,6 @@ func RequestIDMiddleware() Middleware {
 			ctx := WithRequestID(r.Context(), id)
 			ctx = WithRequestStart(ctx, time.Now())
 
-			// Propagate trace ID if present in incoming request.
 			if tid := TraceIDFromHeader(r); tid != "" {
 				ctx = WithTraceID(ctx, tid)
 			}
@@ -113,25 +99,24 @@ func RequestIDMiddleware() Middleware {
 	}
 }
 
-// Logger middleware logs every request with method, path, status code,
-// and duration. Uses structured JSON logging.
+// Logger logs every request with method, path, status, and duration.
 //
-// Query strings are NOT logged by default because they frequently
-// contain tokens, API keys, and PII. Use LoggerWithConfig to enable
-// query logging with automatic redaction of sensitive parameters. (PRIV-02)
+// Query strings are NOT logged by default because they frequently contain
+// tokens, API keys, and PII. Use LoggerWithConfig to enable query logging
+// with automatic redaction of sensitive parameters.
 func Logger(logger *slog.Logger) Middleware {
 	return LoggerWithConfig(logger, LoggerConfig{})
 }
 
 // LoggerConfig configures the Logger middleware.
 type LoggerConfig struct {
-	// IncludeQuery enables logging of query strings. When true, query
-	// parameters are logged with sensitive values redacted. (PRIV-02)
+	// IncludeQuery enables logging of query strings with sensitive values
+	// redacted.
 	IncludeQuery bool
 }
 
-// sensitiveParams are query parameter names whose values are always
-// redacted in logs. Case-insensitive matching. (PRIV-02)
+// sensitiveParams are query parameter names whose values are redacted in
+// logs. Matching is case-insensitive.
 var sensitiveParams = map[string]bool{
 	"token":         true,
 	"key":           true,
@@ -149,13 +134,11 @@ var sensitiveParams = map[string]bool{
 	"pass":          true,
 }
 
-// LoggerWithConfig returns a Logger middleware with custom configuration.
 func LoggerWithConfig(logger *slog.Logger, cfg LoggerConfig) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 
-			// Wrap response writer to capture status code.
 			sw := &statusWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 			next.ServeHTTP(sw, r)
@@ -187,9 +170,7 @@ func LoggerWithConfig(logger *slog.Logger, cfg LoggerConfig) Middleware {
 	}
 }
 
-// redactQuery replaces sensitive query parameter values with "[REDACTED]".
 func redactQuery(rawQuery string) string {
-	// Parse manually to preserve order and handle malformed queries.
 	parts := strings.Split(rawQuery, "&")
 	for i, part := range parts {
 		eqIdx := strings.Index(part, "=")
@@ -204,9 +185,8 @@ func redactQuery(rawQuery string) string {
 	return strings.Join(parts, "&")
 }
 
-// statusWriter wraps http.ResponseWriter to capture the status code
-// while preserving Flusher and Hijacker interfaces for SSE and
-// WebSocket support.
+// statusWriter wraps http.ResponseWriter to capture the status code while
+// preserving Flusher and Hijacker for SSE and WebSocket support.
 type statusWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -230,14 +210,12 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	return sw.ResponseWriter.Write(b)
 }
 
-// Flush passes through to the underlying writer for SSE support.
 func (sw *statusWriter) Flush() {
 	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// Hijack passes through to the underlying writer for WebSocket support.
 func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := sw.ResponseWriter.(http.Hijacker); ok {
 		return h.Hijack()
@@ -245,16 +223,13 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
-// CORS middleware handles Cross-Origin Resource Sharing headers.
-// Configure allowed origins, methods, and headers for browser-based
-// API consumption.
+// CORSConfig configures the CORS middleware.
 type CORSConfig struct {
-	// AllowedOrigins is a list of origins that are allowed.
-	// Use "*" to allow all origins (not recommended for production).
+	// AllowedOrigins is a list of origins that are allowed. Use "*" to
+	// allow all origins (not recommended for production).
 	AllowedOrigins []string
 
-	// AllowedMethods is a list of HTTP methods allowed.
-	// Defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
+	// AllowedMethods defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
 	AllowedMethods []string
 
 	// AllowedHeaders is a list of headers the client may send.
@@ -269,10 +244,9 @@ type CORSConfig struct {
 
 // CORS returns a middleware that handles CORS headers.
 //
-// Panics at startup if AllowedOrigins contains "*" and AllowCredentials
-// is true — the CORS spec forbids this combination. (CONV-05)
+// Panics at startup if AllowedOrigins contains "*" and AllowCredentials is
+// true — the CORS spec forbids this combination.
 func CORS(cfg CORSConfig) Middleware {
-	// Validate dangerous configurations at startup. (CONV-05)
 	hasWildcard := false
 	for _, o := range cfg.AllowedOrigins {
 		if o == "*" {
@@ -292,7 +266,7 @@ func CORS(cfg CORSConfig) Middleware {
 		cfg.AllowedMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
 	}
 	if len(cfg.AllowedHeaders) == 0 {
-		cfg.AllowedHeaders = []string{"Content-Type", "Authorization", "X-Request-ID"}
+		cfg.AllowedHeaders = []string{"Content-Type", "Authorization", "X-Request-ID", "X-CSRF-Token"}
 	}
 	if cfg.MaxAge == 0 {
 		cfg.MaxAge = 86400
@@ -302,7 +276,6 @@ func CORS(cfg CORSConfig) Middleware {
 	headers := strings.Join(cfg.AllowedHeaders, ", ")
 	maxAge := fmt.Sprintf("%d", cfg.MaxAge)
 
-	// Build a set for fast preflight method validation.
 	allowedMethodSet := make(map[string]bool, len(cfg.AllowedMethods))
 	for _, m := range cfg.AllowedMethods {
 		allowedMethodSet[m] = true
@@ -312,21 +285,16 @@ func CORS(cfg CORSConfig) Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			// Always set Vary: Origin to prevent cache poisoning.
-			// Without this, a CDN could serve a CORS-allowed response
-			// to a disallowed origin.
+			// Vary: Origin on every response prevents CDN cache poisoning.
 			w.Header().Add("Vary", "Origin")
 
-			// Check if origin is allowed.
 			matched := ""
 			for _, o := range cfg.AllowedOrigins {
 				if o == "*" {
-					// Wildcard: set literal "*", never reflect input.
 					matched = "*"
 					break
 				}
 				if o == origin {
-					// Specific match: reflect the allowed origin.
 					matched = origin
 					break
 				}
@@ -339,23 +307,18 @@ func CORS(cfg CORSConfig) Middleware {
 				}
 			}
 
-			// Handle preflight.
 			if r.Method == http.MethodOptions {
-				// Vary on preflight-specific headers to prevent CDN
-				// cache poisoning of preflight responses.
 				w.Header().Add("Vary", "Access-Control-Request-Method")
 				w.Header().Add("Vary", "Access-Control-Request-Headers")
 
-				// Set preflight-specific headers (not needed on regular responses).
 				if matched != "" {
 					w.Header().Set("Access-Control-Allow-Methods", methods)
 					w.Header().Set("Access-Control-Allow-Headers", headers)
 					w.Header().Set("Access-Control-Max-Age", maxAge)
 				}
 
-				// Validate the requested method against allowed methods.
-				// If the preflight asks for a method we don't allow,
-				// skip CORS headers so the browser blocks the real request.
+				// If preflight requests a method we don't allow, strip CORS
+				// headers so the browser blocks the real request.
 				if reqMethod := r.Header.Get("Access-Control-Request-Method"); reqMethod != "" {
 					if !allowedMethodSet[reqMethod] {
 						w.Header().Del("Access-Control-Allow-Origin")
@@ -375,12 +338,12 @@ func CORS(cfg CORSConfig) Middleware {
 }
 
 // ClientIPMiddleware resolves the real client IP using the trusted proxy
-// chain and stores it in the request context. Downstream middleware and
-// handlers access it via runko.ClientIP(r.Context()). (CONV-01)
+// chain and stores it in the request context. Handlers access it via
+// runko.ClientIP(r.Context()).
 //
-// Security: When no trusted proxies are configured (the default),
-// X-Forwarded-For is completely ignored and RemoteAddr is used directly.
-// This prevents IP spoofing attacks against rate limiting and audit logs.
+// When no trusted proxies are configured (the default), X-Forwarded-For is
+// ignored and RemoteAddr is used directly. This prevents IP spoofing against
+// rate limiting and audit logs.
 func ClientIPMiddleware(proxy *proxyResolver) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -394,12 +357,11 @@ func ClientIPMiddleware(proxy *proxyResolver) Middleware {
 	}
 }
 
-// RateLimit middleware limits requests per client IP using a simple
-// fixed window counter. No external state needed — runs in-process.
-// For a multi-instance deployment, use an external rate limiter instead.
+// RateLimitConfig configures the RateLimit middleware.
 //
-// Requires ClientIPMiddleware to run first (reads IP from context).
-// Falls back to RemoteAddr if ClientIP is not in context.
+// Requires ClientIPMiddleware to run first; falls back to RemoteAddr when
+// ClientIP is not in context. For multi-instance deployments, use an
+// external rate limiter instead.
 type RateLimitConfig struct {
 	// RequestsPerWindow is the max requests allowed per time window.
 	RequestsPerWindow int
@@ -407,17 +369,29 @@ type RateLimitConfig struct {
 	// Window is the time window for rate limiting.
 	Window time.Duration
 
-	// MaxClients is the maximum number of distinct IPs tracked
-	// simultaneously. When full, new unknown IPs receive 429
-	// immediately. Prevents memory exhaustion under DDoS. (CONV-06)
-	// Default: 10000.
+	// MaxClients caps the number of distinct IPs tracked simultaneously.
+	// When full, new IPs receive 429 immediately. Default: 10000.
 	MaxClients int
+
+	// Logger receives capacity warnings. Defaults to slog.Default().
+	Logger *slog.Logger
+
+	// Clock returns the current time. Defaults to time.Now. Tests inject
+	// a fake clock to exercise window expiry deterministically.
+	Clock func() time.Time
 }
 
-// RateLimit returns a middleware that limits requests per client IP.
+// RateLimit returns a middleware that limits requests per client IP using
+// a fixed window counter. Runs in-process with no external state.
 func RateLimit(cfg RateLimitConfig) Middleware {
 	if cfg.MaxClients == 0 {
 		cfg.MaxClients = 10000
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
 	}
 
 	type client struct {
@@ -427,39 +401,30 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 
 	var mu sync.Mutex
 	clients := make(map[string]*client)
-	lastCleanup := time.Now()
+	lastCleanup := cfg.Clock()
 	capacityWarned := false
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Read resolved client IP from context (set by ClientIPMiddleware).
 			ip := ClientIP(r.Context())
 			if ip == "" {
-				// Fallback if ClientIPMiddleware hasn't run.
 				ip = stripPort(r.RemoteAddr)
 			}
 
 			mu.Lock()
-			now := time.Now()
+			now := cfg.Clock()
 
-			// Inline cleanup: purge expired entries periodically.
-			// Capped to 500 entries per sweep to bound lock duration.
-			// Go's randomized map iteration ensures full coverage
-			// across multiple sweeps.
+			// Inline cleanup: sweep the whole map once per Window. The map
+			// is bounded by MaxClients (10k default), so a full sweep is
+			// cheap — microseconds under the lock. Bounding MaxClients is
+			// the operator's knob for lock duration.
 			if now.Sub(lastCleanup) > cfg.Window {
-				count := 0
 				for clientIP, entry := range clients {
 					if now.Sub(entry.windowStart) > cfg.Window {
 						delete(clients, clientIP)
 					}
-					count++
-					if count >= 500 {
-						break
-					}
 				}
-				if count < 500 {
-					lastCleanup = now // full sweep completed
-				}
+				lastCleanup = now
 				if len(clients) < cfg.MaxClients {
 					capacityWarned = false
 				}
@@ -467,11 +432,10 @@ func RateLimit(cfg RateLimitConfig) Middleware {
 
 			c, exists := clients[ip]
 			if !exists || now.Sub(c.windowStart) > cfg.Window {
-				// Check map capacity before adding new entry. (CONV-06)
 				if !exists && len(clients) >= cfg.MaxClients {
 					if !capacityWarned {
 						capacityWarned = true
-						slog.Warn("rate limiter at capacity, rejecting new clients",
+						cfg.Logger.Warn("rate limiter at capacity, rejecting new clients",
 							"max_clients", cfg.MaxClients,
 							"tracked_clients", len(clients),
 						)

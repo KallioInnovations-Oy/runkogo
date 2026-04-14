@@ -15,16 +15,15 @@ type AllowedHostsConfig struct {
 
 // AllowedHosts returns a middleware that validates the HTTP Host header
 // against a whitelist. Requests with a Host not in the list receive
-// 421 Misdirected Request. This prevents host header injection attacks
-// that can poison caches and generate incorrect URLs.
+// 421 Misdirected Request. This prevents host-header injection that can
+// poison caches and generate incorrect URLs.
 //
-// Panics if Hosts is empty (misconfiguration fail-fast, per CONV-05).
+// Panics if Hosts is empty (fail-fast on misconfiguration).
 func AllowedHosts(cfg AllowedHostsConfig) Middleware {
 	if len(cfg.Hosts) == 0 {
 		panic("runko: AllowedHosts requires at least one allowed hostname")
 	}
 
-	// Normalize to lowercase at construction time for fast matching.
 	allowed := make(map[string]bool, len(cfg.Hosts))
 	for _, h := range cfg.Hosts {
 		allowed[strings.ToLower(strings.TrimSpace(h))] = true
@@ -32,13 +31,7 @@ func AllowedHosts(cfg AllowedHostsConfig) Middleware {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			host := r.Host
-			if host == "" {
-				host = r.Header.Get("Host")
-			}
-
-			// Strip port from host (e.g., "example.com:8080" -> "example.com").
-			host = stripHostPort(host)
+			host := stripHostPort(r.Host)
 			host = strings.ToLower(host)
 
 			if !allowed[host] {

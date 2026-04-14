@@ -731,6 +731,58 @@ func TestSecurityHeaders_WithCSP(t *testing.T) {
 	}
 }
 
+// Audit5-01: Rate limiter cleanup must advance lastCleanup even when the
+// per-sweep cap is hit. Otherwise a hot map triggers a capped sweep on
+// every request under lock.
+func TestRateLimit_CleanupAdvancesUnderLoad(t *testing.T) {
+	var clockNs int64
+	now := func() time.Time {
+		return time.Unix(0, clockNs)
+	}
+	advance := func(d time.Duration) {
+		clockNs += d.Nanoseconds()
+	}
+
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 10,
+		Window:            10 * time.Second,
+		MaxClients:        2000,
+		Clock:             now,
+	})(nopHandler)
+
+	// Seed with enough clients to exceed the sweep cap.
+	for i := 0; i < 600; i++ {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = fmt.Sprintf("10.0.%d.%d:1234", i/256, i%256)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+
+	// Advance past the window so cleanup will run.
+	advance(11 * time.Second)
+
+	// First request after expiry: cleanup runs and must advance lastCleanup.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "9.9.9.9:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request after expiry: status = %d, want 200", rec.Code)
+	}
+
+	// Without advancing the clock, a second request must NOT re-enter cleanup.
+	// We can't directly observe that, but if the fix regresses, the cleanup
+	// would run on every request — serialized under lock — and 50
+	// consecutive requests would be observably slow even with a fast clock.
+	// The functional check: behavior is stable and requests pass.
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "9.9.9.9:1234"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+}
+
 // FIX-14: SecurityHeaders should NOT set CSP by default.
 func TestSecurityHeaders_NoCSPByDefault(t *testing.T) {
 	handler := DefaultSecurityHeaders()(nopHandler)

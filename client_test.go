@@ -12,7 +12,7 @@ import (
 )
 
 func TestCircuitBreaker_ClosedByDefault(t *testing.T) {
-	cb := newCircuitBreaker(3, 1*time.Second)
+	cb := newCircuitBreaker(3, 1*time.Second, nil)
 
 	if !cb.allow() {
 		t.Error("circuit breaker should be closed (allowing) by default")
@@ -20,7 +20,7 @@ func TestCircuitBreaker_ClosedByDefault(t *testing.T) {
 }
 
 func TestCircuitBreaker_OpensAfterThreshold(t *testing.T) {
-	cb := newCircuitBreaker(3, 1*time.Second)
+	cb := newCircuitBreaker(3, 1*time.Second, nil)
 
 	// Record failures up to threshold.
 	for i := 0; i < 3; i++ {
@@ -33,7 +33,7 @@ func TestCircuitBreaker_OpensAfterThreshold(t *testing.T) {
 }
 
 func TestCircuitBreaker_ResetOnSuccess(t *testing.T) {
-	cb := newCircuitBreaker(3, 1*time.Second)
+	cb := newCircuitBreaker(3, 1*time.Second, nil)
 
 	cb.recordFailure()
 	cb.recordFailure()
@@ -54,7 +54,7 @@ func TestCircuitBreaker_ResetOnSuccess(t *testing.T) {
 }
 
 func TestCircuitBreaker_HalfOpenAfterCooldown(t *testing.T) {
-	cb := newCircuitBreaker(2, 50*time.Millisecond)
+	cb := newCircuitBreaker(2, 50*time.Millisecond, nil)
 
 	cb.recordFailure()
 	cb.recordFailure()
@@ -79,7 +79,7 @@ func TestCircuitBreaker_HalfOpenAfterCooldown(t *testing.T) {
 }
 
 func TestCircuitBreaker_HalfOpen_SuccessCloses(t *testing.T) {
-	cb := newCircuitBreaker(2, 50*time.Millisecond)
+	cb := newCircuitBreaker(2, 50*time.Millisecond, nil)
 
 	cb.recordFailure()
 	cb.recordFailure()
@@ -98,7 +98,7 @@ func TestCircuitBreaker_HalfOpen_SuccessCloses(t *testing.T) {
 }
 
 func TestCircuitBreaker_HalfOpen_FailureReopens(t *testing.T) {
-	cb := newCircuitBreaker(2, 50*time.Millisecond)
+	cb := newCircuitBreaker(2, 50*time.Millisecond, nil)
 
 	cb.recordFailure()
 	cb.recordFailure()

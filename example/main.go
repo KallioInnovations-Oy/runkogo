@@ -293,16 +293,16 @@ func main() {
 		// Catch panics so one bad request doesn't crash the server.
 		runko.Recovery(app.Logger),
 
-		// Limit all request bodies to 1MB. (CONV-06)
+		// Limit all request bodies to 1MB.
 		runko.BodyLimit(1<<20),
 
-		// Set security headers on every response. (CONV-04)
+		// Set security headers on every response.
 		runko.DefaultSecurityHeaders(),
 
 		// Inject request ID (generate or forward from upstream).
 		runko.RequestIDMiddleware(),
 
-		// Resolve real client IP through trusted proxy chain. (CONV-01)
+		// Resolve real client IP through trusted proxy chain.
 		runko.ClientIPMiddleware(app.Proxy),
 
 		// Log every request with method, path, status, duration.

@@ -29,6 +29,7 @@ type Router struct {
 	prefix     string
 	logger     *slog.Logger
 }
+
 func newRouter(logger *slog.Logger) *Router {
 	return &Router{
 		mux:    http.NewServeMux(),
@@ -37,8 +38,13 @@ func newRouter(logger *slog.Logger) *Router {
 }
 
 // Use appends middleware to the router's chain. Middleware runs in the
-// order added: Use(A); Use(B) means A runs first, calls B, which
-// calls the handler.
+// order added: Use(A); Use(B) means A runs first, calls B, which calls
+// the handler.
+//
+// Register all middleware BEFORE calling Handle. Routes freeze their chain
+// at registration time, so middleware added after a Handle call will not
+// apply to that route. Use is not safe for concurrent calls once the
+// server is serving requests.
 func (rt *Router) Use(mw ...Middleware) {
 	rt.middleware = append(rt.middleware, mw...)
 }
@@ -63,7 +69,6 @@ func (rt *Router) Handle(pattern string, handler http.Handler) {
 }
 
 // HandleFunc is a convenience wrapper around Handle.
-// Convenience wrapper around Handle.
 func (rt *Router) HandleFunc(pattern string, fn http.HandlerFunc) {
 	rt.Handle(pattern, fn)
 }

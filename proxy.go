@@ -8,26 +8,29 @@ import (
 // proxyResolver determines the real client IP by walking the
 // X-Forwarded-For chain and stopping at the last untrusted hop.
 //
-// Security model (CONV-01):
-//   - If no trusted proxies are configured, forwarding headers are
-//     IGNORED entirely and RemoteAddr is always used. This is the
-//     secure default.
-//   - If trusted proxies are configured, the resolver reads
-//     X-Forwarded-For right-to-left (since the rightmost entries
-//     are added by infrastructure you control) and returns the
-//     first IP that is NOT in the trusted set. This is the real
-//     client IP.
-//   - The leftmost X-Forwarded-For entry is client-controlled and
-//     must NEVER be trusted unconditionally.
+// Security model:
+//   - No trusted proxies configured: forwarding headers are ignored and
+//     RemoteAddr is always used. This is the secure default.
+//   - With trusted proxies: X-Forwarded-For is read right-to-left (the
+//     rightmost entries are added by infrastructure you control) and the
+//     first non-trusted IP is returned as the real client.
+//   - The leftmost X-Forwarded-For entry is client-controlled and must
+//     never be trusted unconditionally.
+//
+// Dual-stack note: when the server listens on "::" the OS may deliver
+// connections from IPv4 peers as IPv4-mapped IPv6 (::ffff:a.b.c.d).
+// List trusted proxies in their IPv4 form (e.g. "10.0.0.0/8") — Go's
+// net.IPNet.Contains normalizes the mapped form on match. Listing them
+// as IPv6 (::ffff:10.0.0.0/104) will NOT match an IPv4 X-Forwarded-For
+// entry; the asymmetry is load-bearing on how you write the config.
 type proxyResolver struct {
 	trusted []net.IPNet
 	enabled bool
 }
 
-// newProxyResolver creates a resolver from a list of trusted
-// proxy addresses. Accepts individual IPs ("127.0.0.1") and CIDR
-// ranges ("10.0.0.0/8"). Panics on invalid entries to enforce
-// fail-fast at startup (CONV-05).
+// newProxyResolver creates a resolver from a list of trusted proxies.
+// Accepts individual IPs ("127.0.0.1") and CIDR ranges ("10.0.0.0/8").
+// Panics on invalid entries to fail fast at startup.
 func newProxyResolver(trustedProxies []string) *proxyResolver {
 	if len(trustedProxies) == 0 {
 		return &proxyResolver{enabled: false}

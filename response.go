@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // Map is a convenience alias for building JSON response payloads.
@@ -14,8 +15,8 @@ import (
 //	runko.JSON(w, 200, runko.Map{"user": user, "token": token})
 type Map map[string]any
 
-// JSON writes a JSON response with the given status code.
-// Sets Content-Type to application/json automatically.
+// JSON writes a JSON response with the given status code and sets
+// Content-Type automatically.
 func JSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -26,18 +27,14 @@ func JSON(w http.ResponseWriter, status int, data any) {
 	}
 }
 
-// Error writes a standardized JSON error response. Every error from
-// every service in the cluster has the same shape, making client-side
-// error handling consistent.
+// Error writes a standardized JSON error envelope.
 //
-// Output format:
+//	{"error": {"code": "not_found", "message": "User not found"}}
 //
-//	{
-//	    "error": {
-//	        "code": "not_found",
-//	        "message": "User not found"
-//	    }
-//	}
+// The message MUST be a generic, public-safe string: never include user
+// input, stack traces, hostnames, connection strings, or raw library
+// errors. When you have an internal error to record alongside the public
+// response, call ErrorLog instead.
 func Error(w http.ResponseWriter, status int, code string, message string) {
 	JSON(w, status, Map{
 		"error": Map{
@@ -47,9 +44,33 @@ func Error(w http.ResponseWriter, status int, code string, message string) {
 	})
 }
 
-// ErrorWithDetails writes an error response with additional detail fields.
-// Useful for validation errors where you want to tell the client which
-// fields failed.
+// ErrorLog writes a public error response and records the internal error
+// against the request's logger, enriched with request_id and trace_id from
+// context. The public response is identical to Error's; only the server
+// sees the internal detail.
+//
+// Example:
+//
+//	if err := db.Create(ctx, user); err != nil {
+//	    runko.ErrorLog(w, r, logger, 500, "store_error", "Failed to create user", err)
+//	    return
+//	}
+func ErrorLog(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, code string, message string, internal error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	attrs := []any{"code", code, "status", status, "error", internal}
+	if r != nil {
+		logger = LogWithContext(logger, r.Context())
+		attrs = append(attrs, "method", r.Method, "path", r.URL.Path)
+	}
+	logger.Error("handler error", attrs...)
+	Error(w, status, code, message)
+}
+
+// ErrorWithDetails writes an error response with additional detail fields,
+// useful for validation errors that list failing fields. Detail values
+// must be server-controlled — never echo raw user input here.
 //
 // Example:
 //
@@ -67,16 +88,22 @@ func ErrorWithDetails(w http.ResponseWriter, status int, code string, message st
 	JSON(w, status, payload)
 }
 
-// Created writes a 201 Created response with the given data and
-// Location header pointing to the new resource.
+// Created writes a 201 with a Location header pointing to the new resource.
+// Rejects locations containing CR/LF to prevent header injection — callers
+// must pre-sanitize or this panics at startup-level fail-fast. Handlers
+// should construct Location values from trusted server-side data (e.g.,
+// a newly minted UUID), not raw user input.
 func Created(w http.ResponseWriter, location string, data any) {
 	if location != "" {
+		if strings.ContainsAny(location, "\r\n") {
+			panic("runko: Created() Location contains CR/LF — possible header injection")
+		}
 		w.Header().Set("Location", location)
 	}
 	JSON(w, http.StatusCreated, data)
 }
 
-// NoContent responds with 204 (successful DELETE, etc.)
+// NoContent responds with 204 (successful DELETE, etc.).
 func NoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -118,27 +145,18 @@ func Paginated(w http.ResponseWriter, data any, page, perPage, total int) {
 	})
 }
 
-// Decode reads and validates a JSON request body into the target struct.
-// Returns an error if the body is malformed, too large, or contains
-// trailing data after the JSON value.
-//
-// The body is limited to 1MB by default. Use DecodeWithLimit for a
-// custom size limit.
+// Decode reads and validates a JSON request body into target. Returns an
+// error if the body is malformed, too large, or contains trailing data.
+// The body is limited to 1 MB; use DecodeWithLimit for a custom limit.
 func Decode(w http.ResponseWriter, r *http.Request, target any) error {
-	return DecodeWithLimit(w, r, target, 1<<20) // 1MB
+	return DecodeWithLimit(w, r, target, 1<<20)
 }
 
-// DecodeWithLimit reads a JSON request body with a custom size limit.
-// The maxBytes parameter controls the maximum body size in bytes.
+// DecodeWithLimit reads a JSON body with a custom size limit.
 //
-// Note: if BodyLimit middleware is active, the stricter of the two
-// limits wins. BodyLimit(1MB) + DecodeWithLimit(10MB) = 1MB effective.
-//
-// Returns an error if:
-//   - The body exceeds maxBytes (or the BodyLimit, whichever is smaller)
-//   - The JSON is malformed
-//   - Unknown fields are present
-//   - Multiple JSON values are present (trailing data)
+// If BodyLimit middleware is active, the stricter of the two limits wins.
+// Rejects malformed JSON, unknown fields, and trailing data after the
+// JSON value (which would allow payload smuggling).
 func DecodeWithLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 
@@ -149,9 +167,6 @@ func DecodeWithLimit(w http.ResponseWriter, r *http.Request, target any, maxByte
 		return err
 	}
 
-	// Reject bodies with trailing data after the JSON value.
-	// This prevents payload smuggling where extra data is appended
-	// after a valid JSON object.
 	if decoder.More() {
 		return fmt.Errorf("request body contains trailing data after JSON value")
 	}

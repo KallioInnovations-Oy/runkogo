@@ -6,6 +6,7 @@ package runko
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,56 +18,47 @@ import (
 	"time"
 )
 
+// Default header budget: enough for browser traffic with cookies, JWTs, and
+// tracing headers; 16× tighter than Go's 1 MB default to shrink DoS surface.
+const defaultMaxHeaderBytes = 64 << 10
+
 // App is the central application container. It manages the HTTP server
 // lifecycle, middleware chains, configuration, and graceful shutdown.
 type App struct {
-	// Config holds the application configuration loaded from environment.
 	Config *ConfigLoader
-
-	// Logger is the structured logger for this application.
 	Logger *slog.Logger
-
-	// Router is the HTTP router with middleware support.
 	Router *Router
 
-	// Proxy resolves client IPs through trusted proxy chains. (CONV-01)
+	// Proxy resolves client IPs through trusted proxy chains.
 	Proxy *proxyResolver
 
-	// server is the underlying HTTP server.
 	server *http.Server
 
-	// serviceName identifies this service in logs and health checks.
-	serviceName string
-
-	// shutdownTimeout is how long to wait for in-flight requests on shutdown.
+	serviceName     string
 	shutdownTimeout time.Duration
 
-	// onStartup hooks run after the server is configured but before listening.
-	onStartup []func(ctx context.Context) error
-
-	// onShutdown hooks run during graceful shutdown (close DB, flush buffers).
+	onStartup  []func(ctx context.Context) error
 	onShutdown []func(ctx context.Context) error
 
-	// health tracks readiness state.
 	health *healthState
 
-	// tlsCert and tlsKey paths for HTTPS. Both empty = HTTP only.
-	tlsCert string
-	tlsKey  string
+	tlsCert       string
+	tlsKey        string
+	tlsMinVersion uint16
+
+	maxHeaderBytes int
 
 	// stop cancels the Run() context, triggering graceful shutdown.
-	// Set internally by Run(); used by tests via triggerShutdown().
+	// Set by Run; used by tests via triggerShutdown.
 	stop context.CancelFunc
 }
 
-// healthState tracks liveness and readiness independently.
 type healthState struct {
 	mu     sync.RWMutex
 	ready  bool
 	checks []healthCheck
 }
 
-// healthCheck is a named readiness check with a timeout.
 type healthCheck struct {
 	name    string
 	timeout time.Duration
@@ -87,32 +79,38 @@ type Options struct {
 	// Accepts: "debug", "info", "warn", "error".
 	LogLevel string
 
-	// TrustedProxies is a list of IP addresses or CIDR ranges that are
-	// allowed to set forwarding headers (X-Forwarded-For, X-Real-IP).
-	// If empty (the default), forwarding headers are IGNORED and
-	// RemoteAddr is always used. This is secure by default. (CONV-01)
+	// TrustedProxies is a list of IP addresses or CIDR ranges allowed to
+	// set forwarding headers (X-Forwarded-For, X-Real-IP). If empty (the
+	// default), forwarding headers are ignored and RemoteAddr is always
+	// used — secure by default.
 	//
-	// Examples:
-	//   "127.0.0.1"       — local reverse proxy
-	//   "10.0.0.0/8"      — private network
-	//   "172.17.0.0/16"   — Docker default bridge
+	// Examples: "127.0.0.1", "10.0.0.0/8", "172.17.0.0/16".
 	TrustedProxies []string
 
-	// TLSCert is the path to a PEM-encoded TLS certificate file.
-	// When both TLSCert and TLSKey are set, the server uses HTTPS.
-	// When neither is set, the server uses HTTP (assumes TLS
-	// termination at a reverse proxy). Panics if only one is set.
+	// TLSCert and TLSKey are paths to a PEM-encoded cert and key. When both
+	// are set the server uses HTTPS; when neither is set the server uses
+	// HTTP (assumes TLS termination at a reverse proxy). Panics if only
+	// one is set.
 	TLSCert string
+	TLSKey  string
 
-	// TLSKey is the path to a PEM-encoded TLS private key file.
-	TLSKey string
+	// TLSMinVersion is the minimum TLS version accepted when serving
+	// HTTPS. Defaults to tls.VersionTLS12. Set to tls.VersionTLS13 to
+	// require TLS 1.3 (recommended for new deployments).
+	TLSMinVersion uint16
+
+	// MaxHeaderBytes caps the size of request line + headers. Defaults to
+	// 64 KiB, which fits typical browser traffic (cookies + JWT + tracing)
+	// while rejecting abusive payloads. Raise for SSO-heavy deployments
+	// with large SAML cookies.
+	MaxHeaderBytes int
 }
 
 // New creates a new App with the given options. This is the single entry
 // point for any RunkoGO application. It sets up config loading, structured
 // logging, a router with standard middleware, and health endpoints.
-// Panics if TrustedProxies contains invalid entries or TLS is
-// partially configured (CONV-05).
+// Panics if TrustedProxies contains invalid entries or TLS is partially
+// configured.
 func New(opts Options) *App {
 	if opts.ServiceName == "" {
 		opts.ServiceName = "runko-app"
@@ -123,8 +121,13 @@ func New(opts Options) *App {
 	if opts.LogLevel == "" {
 		opts.LogLevel = "info"
 	}
+	if opts.TLSMinVersion == 0 {
+		opts.TLSMinVersion = tls.VersionTLS12
+	}
+	if opts.MaxHeaderBytes == 0 {
+		opts.MaxHeaderBytes = defaultMaxHeaderBytes
+	}
 
-	// Validate TLS config: both or neither must be set. (CONV-05)
 	if (opts.TLSCert == "") != (opts.TLSKey == "") {
 		certStatus, keyStatus := "<set>", "<set>"
 		if opts.TLSCert == "" {
@@ -148,6 +151,8 @@ func New(opts Options) *App {
 		shutdownTimeout: opts.ShutdownTimeout,
 		tlsCert:         opts.TLSCert,
 		tlsKey:          opts.TLSKey,
+		tlsMinVersion:   opts.TLSMinVersion,
+		maxHeaderBytes:  opts.MaxHeaderBytes,
 		health: &healthState{
 			ready:  false,
 			checks: make([]healthCheck, 0),
@@ -161,23 +166,28 @@ func New(opts Options) *App {
 
 // OnStartup registers a function to run during application startup,
 // before the HTTP server begins accepting requests. Use this for
-// database connections, cache warming, migrations, etc.
-// If any startup hook returns an error, the application exits.
+// database connections, cache warming, migrations. If any startup hook
+// returns an error, the application exits.
 func (a *App) OnStartup(fn func(ctx context.Context) error) {
 	a.onStartup = append(a.onStartup, fn)
 }
 
 // OnShutdown registers a function to run during graceful shutdown,
 // after the HTTP server has stopped accepting new requests.
-// Use this for closing database pools, flushing buffers, etc.
+// Use this for closing database pools, flushing buffers.
 func (a *App) OnShutdown(fn func(ctx context.Context) error) {
 	a.onShutdown = append(a.onShutdown, fn)
 }
 
 // AddHealthCheck registers a named readiness check with a timeout.
 // The app reports as not ready if any registered check returns an error.
-// Each check runs with its own context deadline so a slow database
-// ping can't block all other checks. (CONV-07)
+// Each check runs with its own context deadline so a slow database ping
+// can't block all other checks.
+//
+// The check slice is append-only: readinessHandler snapshots the slice
+// header under RLock and iterates it lock-free. If a RemoveHealthCheck
+// were added, readinessHandler would need to copy the entries under the
+// lock or take the lock for the duration of the scan.
 //
 // Example:
 //
@@ -194,24 +204,13 @@ func (a *App) AddHealthCheck(name string, timeout time.Duration, check func(ctx 
 	})
 }
 
-// Run starts the HTTP server and blocks until a shutdown signal is
-// received (SIGINT or SIGTERM). It handles the full lifecycle:
-//
-//  1. Run startup hooks
-//  2. Start HTTP server
-//  3. Mark as ready
-//  4. Block until signal
-//  5. Mark as not ready
-//  6. Gracefully drain connections
-//  7. Run shutdown hooks
-//  8. Exit
+// Run starts the HTTP server and blocks until SIGINT or SIGTERM, then
+// gracefully drains in-flight requests and runs shutdown hooks.
 func (a *App) Run() error {
-	// Create root context that cancels on OS signal.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	a.stop = stop
 
-	// Run startup hooks.
 	for _, fn := range a.onStartup {
 		if err := fn(ctx); err != nil {
 			a.Logger.Error("startup hook failed", "error", err)
@@ -219,11 +218,9 @@ func (a *App) Run() error {
 		}
 	}
 
-	// Determine bind address.
 	host := a.Config.GetDefault("HOST", "0.0.0.0")
 	port := a.Config.GetDefault("PORT", "19100")
 
-	// Validate port is a valid number.
 	portNum, err := strconv.Atoi(port)
 	if err != nil || portNum < 1 || portNum > 65535 {
 		return fmt.Errorf("invalid PORT %q: must be a number between 1 and 65535", port)
@@ -231,31 +228,34 @@ func (a *App) Run() error {
 
 	addr := host + ":" + port
 
-	// Register health endpoints now, after all Use() calls have been made.
-	// This ensures they inherit global middleware (logging, request ID,
-	// client IP) while remaining outside any auth-protected groups.
+	// Register health endpoints now, after all Use() calls have been made,
+	// so they inherit global middleware (logging, request ID, client IP)
+	// while staying outside any auth-protected groups.
 	a.Router.Handle("GET /healthz", a.livenessHandler())
 	a.Router.Handle("GET /readyz", a.readinessHandler())
 
-	// Bind the port first, before starting the server goroutine.
-	// This ensures the port is actually available before marking ready.
+	// Bind before starting the server goroutine so we can return the
+	// bind error directly and avoid racing the readiness flag.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
-	// Configure HTTP server.
+	useTLS := a.tlsCert != "" && a.tlsKey != ""
+
 	a.server = &http.Server{
 		Handler:           a.Router,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    a.maxHeaderBytes,
+	}
+	if useTLS {
+		a.server.TLSConfig = &tls.Config{MinVersion: a.tlsMinVersion}
 	}
 
-	// Start server in background.
 	serverErr := make(chan error, 1)
-	useTLS := a.tlsCert != "" && a.tlsKey != ""
 	go func() {
 		proto := "http"
 		if useTLS {
@@ -275,23 +275,20 @@ func (a *App) Run() error {
 		close(serverErr)
 	}()
 
-	// Wait briefly for any immediate server startup errors (e.g., TLS
-	// misconfiguration) before marking as ready.
+	// Wait briefly for immediate startup errors (e.g., TLS misconfiguration)
+	// before marking as ready.
 	select {
 	case err := <-serverErr:
 		return fmt.Errorf("server error: %w", err)
 	case <-time.After(50 * time.Millisecond):
-		// No immediate error — server is running.
 	}
 
-	// Mark as ready — the port is bound, the server is accepting.
 	a.health.mu.Lock()
 	a.health.ready = true
 	a.health.mu.Unlock()
 
 	a.Logger.Info("service ready", "addr", ln.Addr().String())
 
-	// Block until signal or server error.
 	select {
 	case err := <-serverErr:
 		return fmt.Errorf("server error: %w", err)
@@ -299,12 +296,10 @@ func (a *App) Run() error {
 		a.Logger.Info("shutdown signal received")
 	}
 
-	// Mark as not ready (load balancer stops sending traffic).
 	a.health.mu.Lock()
 	a.health.ready = false
 	a.health.mu.Unlock()
 
-	// Phase 1: Gracefully drain HTTP connections.
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer drainCancel()
 
@@ -312,9 +307,8 @@ func (a *App) Run() error {
 		a.Logger.Error("server shutdown error", "error", err)
 	}
 
-	// Phase 2: Run shutdown hooks with their own full timeout.
-	// This ensures hooks get adequate time even if HTTP drain
-	// consumed most of phase 1.
+	// Shutdown hooks get a fresh full timeout so they aren't starved when
+	// HTTP drain consumes most of phase 1.
 	hookCtx, hookCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer hookCancel()
 
@@ -328,21 +322,30 @@ func (a *App) Run() error {
 	return nil
 }
 
-// livenessHandler returns 200 if the process is alive.
-// Kubernetes uses this to know whether to restart the container.
+// runHealthCheck executes a single check with its own deadline and recovers
+// from panics so one bad check does not abort the readiness report.
+func (a *App) runHealthCheck(parent context.Context, hc healthCheck) (err error) {
+	ctx, cancel := context.WithTimeout(parent, hc.timeout)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return hc.check(ctx)
+}
+
+// livenessHandler returns 200 if the process is alive. Kubernetes uses this
+// to decide whether to restart the container.
 func (a *App) livenessHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusOK, Map{"status": "alive"})
 	})
 }
 
-// readinessHandler returns 200 if the service is ready to handle traffic.
-// Returns 503 if not ready or if any health check fails.
-//
-// By default, failure responses list only the NAMES of failing checks,
-// never the error details (which may contain hostnames, ports, or
-// connection strings). Set HEALTH_DETAIL=true to include error messages
-// for debugging. (CONV-03)
+// readinessHandler returns 200 if the service is ready to handle traffic,
+// 503 otherwise. Failure responses list only the names of failing checks;
+// set HEALTH_DETAIL=true to include error messages for debugging.
 func (a *App) readinessHandler() http.Handler {
 	showDetail := a.Config.GetBool("HEALTH_DETAIL")
 
@@ -359,30 +362,25 @@ func (a *App) readinessHandler() http.Handler {
 			return
 		}
 
-		// Run all registered health checks with per-check timeouts. (CONV-07)
 		failedNames := make([]string, 0)
 		failedDetails := make(map[string]string)
 		for _, hc := range checks {
-			checkCtx, checkCancel := context.WithTimeout(r.Context(), hc.timeout)
-			if err := hc.check(checkCtx); err != nil {
+			err := a.runHealthCheck(r.Context(), hc)
+			if err != nil {
 				failedNames = append(failedNames, hc.name)
 				failedDetails[hc.name] = err.Error()
-				// Always log the full error internally.
 				a.Logger.Error("health check failed",
 					"check", hc.name,
 					"error", err.Error(),
 				)
 			}
-			checkCancel()
 		}
 
 		if len(failedNames) > 0 {
 			response := Map{"status": "degraded"}
 			if showDetail {
-				// Detailed mode: include error messages (dev/debug only).
 				response["failures"] = failedDetails
 			} else {
-				// Default mode: list only check names, no error details.
 				response["failures"] = failedNames
 			}
 			JSON(w, http.StatusServiceUnavailable, response)

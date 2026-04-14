@@ -11,15 +11,15 @@ A zero-dependency Go framework for JSON APIs and microservice clusters. Built by
 All features use only the Go standard library (Go 1.22+). Zero external dependencies.
 
 - **App lifecycle** — Graceful startup, shutdown, and signal handling
-- **Health endpoints** — `/healthz` (liveness) and `/readyz` (readiness) with custom checks
+- **Health endpoints** — `/healthz` (liveness) and `/readyz` (readiness) with custom checks; each check runs with its own deadline and panic recovery
 - **Router** — Built on Go 1.22's enhanced `http.ServeMux` with route groups and middleware
-- **Middleware** — Composable chain: recovery, request ID, logging, CORS, rate limiting
+- **Middleware** — Composable chain: recovery, request ID, logging, CORS, CSRF, rate limiting, body limits, allowed-hosts, security headers, client-IP resolution
 - **Config** — Typed environment variable loading with validation
-- **Structured logging** — JSON via `slog` with automatic request context
-- **Context propagation** — Request ID, user ID, and trace ID flow through every call
-- **HTTP client** — Service-to-service calls with retries, circuit breaker, and header forwarding
-- **Response helpers** — JSON, errors, pagination, and request body decoding
-- **Security** — Headers, host validation, trusted proxy resolution, body limits
+- **Structured logging** — JSON via `slog` with automatic request context and sensitive-parameter redaction
+- **Context propagation** — Request ID, user ID, trace ID, and resolved client IP flow through every call
+- **HTTP client** — Service-to-service calls with retries, circuit breaker, response-size limits, and header forwarding
+- **Response helpers** — JSON, errors, pagination, and request body decoding with size limits
+- **Security** — Hardened TLS, bounded headers, CSRF, trusted-proxy IP resolution, host validation, security headers, CR/LF injection guards
 
 ## Quick Start
 
@@ -54,10 +54,11 @@ runkogo/
 ├── app.go          # App lifecycle, startup/shutdown, health checks
 ├── client.go       # HTTP client with retries and circuit breaker
 ├── config.go       # Environment variable loading
-├── context.go      # Request-scoped context values
+├── context.go      # Request-scoped context values, request ID generation
+├── csrf.go         # Double-submit-cookie CSRF middleware
 ├── hosts.go        # Allowed host validation middleware
 ├── logger.go       # Structured logging (slog wrapper)
-├── middleware.go    # Standard middleware (recovery, logging, CORS, rate limit)
+├── middleware.go   # Standard middleware (recovery, logging, CORS, rate limit, body limit)
 ├── proxy.go        # Trusted proxy IP resolution
 ├── response.go     # JSON response helpers, error formatting, pagination
 ├── router.go       # Router with groups and middleware support
@@ -79,6 +80,9 @@ app := runko.New(runko.Options{
     ServiceName:     "my-service",
     ShutdownTimeout: 15 * time.Second,
     LogLevel:        "info",
+    TrustedProxies:  []string{"10.0.0.0/8"}, // optional
+    TLSMinVersion:   tls.VersionTLS13,       // optional; default TLS 1.2
+    MaxHeaderBytes:  64 << 10,               // optional; default 64 KiB
 })
 
 app.OnStartup(func(ctx context.Context) error {
@@ -125,19 +129,30 @@ api.Handle("GET /users", listUsers)       // matches GET /api/v1/users
 api.Handle("GET /users/{id}", getUser)    // matches GET /api/v1/users/{id}
 ```
 
+Register middleware with `Use` BEFORE calling `Handle` — routes freeze their middleware chain at registration time.
+
 ### Middleware
 
 Middleware is a function `func(http.Handler) http.Handler`. They compose like nesting dolls:
 
 ```go
-// Global middleware (runs on every request):
 app.Router.Use(
     runko.Recovery(app.Logger),
+    runko.BodyLimit(1 << 20),              // 1 MB cap on request bodies
+    runko.DefaultSecurityHeaders(),         // CSP-ready headers
     runko.RequestIDMiddleware(),
+    runko.ClientIPMiddleware(app.Proxy),
     runko.Logger(app.Logger),
+    runko.RateLimit(runko.RateLimitConfig{
+        RequestsPerWindow: 100,
+        Window:            1 * time.Minute,
+    }),
 )
+```
 
-// Custom middleware:
+Custom middleware:
+
+```go
 func requireAdmin(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         if runko.UserID(r.Context()) != "admin" {
@@ -148,6 +163,40 @@ func requireAdmin(next http.Handler) http.Handler {
     })
 }
 ```
+
+### Security
+
+Every response inherits the framework's security conventions. See [SECURITY.md](SECURITY.md) for the full policy.
+
+```go
+// Security headers (nosniff, frame-deny, referrer, permissions, etc.)
+app.Router.Use(runko.DefaultSecurityHeaders())
+
+// CSRF for cookie-authenticated webapps (double-submit cookie)
+app.Router.Use(runko.CSRF(runko.CSRFConfig{
+    SameSite: http.SameSiteStrictMode, // default is Lax
+}))
+
+// Reject requests whose Host header is not one of ours
+app.Router.Use(runko.AllowedHosts(runko.AllowedHostsConfig{
+    Hosts: []string{"api.example.com", "api.example.fi"},
+}))
+
+// Resolve the real client IP behind a load balancer
+app := runko.New(runko.Options{
+    TrustedProxies: []string{"10.0.0.0/8"},
+})
+app.Router.Use(runko.ClientIPMiddleware(app.Proxy))
+// ... later:
+ip := runko.ClientIP(r.Context())
+```
+
+Secure defaults worth knowing:
+- TLS 1.2 minimum (set `TLSMinVersion: tls.VersionTLS13` for new deployments).
+- `MaxHeaderBytes` defaults to 64 KiB — tight enough to shrink DoS surface, loose enough for typical browser traffic.
+- `X-Forwarded-For` is ignored unless `TrustedProxies` is configured.
+- Query strings are not logged by default; when enabled, sensitive parameters (tokens, keys, session IDs) are redacted automatically.
+- `runko.Error(w, status, code, publicMsg)` never surfaces internal detail. Use `runko.ErrorLog(w, r, logger, status, code, publicMsg, err)` to attach an internal error to the server log with request correlation.
 
 ### Configuration
 
@@ -179,6 +228,7 @@ orderClient := runko.NewServiceClient(runko.ServiceClientConfig{
     MaxRetries:       2,
     CircuitThreshold: 5,
     CircuitCooldown:  30 * time.Second,
+    MaxResponseSize:  10 << 20, // 10 MB cap to prevent OOM
 })
 
 // In a handler:
@@ -187,6 +237,7 @@ err := orderClient.GetJSON(r.Context(), "/api/v1/orders?user_id=42", &orders)
 
 // Request ID and trace ID are automatically forwarded.
 // Circuit breaker stops calls if the service is consistently failing.
+// Non-idempotent methods (POST, PATCH) are NOT retried by default.
 ```
 
 ### Health Checks
@@ -206,6 +257,8 @@ app.AddHealthCheck("redis", 2*time.Second, func(ctx context.Context) error {
 })
 ```
 
+Each check runs with its own deadline and panic recovery so one bad check can't abort the readiness report. Failure responses list only the names of failing checks; set `HEALTH_DETAIL=true` to include error messages for debugging.
+
 A load balancer or orchestrator hits `/readyz` to decide whether to route traffic to this instance. During shutdown, readiness is set to false before draining connections, giving the load balancer time to stop sending new requests.
 
 ### Responses
@@ -216,15 +269,18 @@ Consistent JSON responses across all services:
 // Success
 runko.JSON(w, 200, runko.Map{"user": user})
 
-// Created with Location header
+// Created with Location header (panics on CR/LF — use server-minted IDs)
 runko.Created(w, "/api/v1/users/42", user)
 
 // No content (DELETE)
 runko.NoContent(w)
 
-// Error (consistent shape)
+// Public error (consistent shape, never echoes internal detail)
 runko.Error(w, 404, "not_found", "User not found")
 // {"error": {"code": "not_found", "message": "User not found"}}
+
+// Public error + internal logging (recommended when you have an error)
+runko.ErrorLog(w, r, app.Logger, 500, "store_error", "Failed to create user", err)
 
 // Validation error with details
 runko.ErrorWithDetails(w, 422, "validation_error", "Invalid input",
@@ -289,10 +345,12 @@ Each service discovers others via Docker Compose's built-in DNS. No service regi
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | HTTP server port | `19100` |
-| `LOG_LEVEL` | Log level: debug, info, warn, error | `info` |
+| Variable        | Description                                      | Default |
+|-----------------|--------------------------------------------------|---------|
+| `PORT`          | HTTP server port                                 | `19100` |
+| `HOST`          | HTTP bind address                                | `0.0.0.0` |
+| `LOG_LEVEL`     | Log level: `debug`, `info`, `warn`, `error`      | `info`  |
+| `HEALTH_DETAIL` | Include failing-check error messages in `/readyz` | `false` |
 
 Add your own via `app.Config.Get()` / `app.Config.MustGet()`.
 

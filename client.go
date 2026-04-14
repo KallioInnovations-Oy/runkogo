@@ -1,6 +1,7 @@
 package runko
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,9 +13,9 @@ import (
 	"time"
 )
 
-// ServiceClient is an HTTP client for service-to-service communication.
-// It provides automatic retries, circuit breaking, timeout enforcement,
-// and request ID propagation across service boundaries.
+// ServiceClient is an HTTP client for service-to-service communication with
+// automatic retries, circuit breaking, timeout enforcement, and request-ID
+// propagation.
 type ServiceClient struct {
 	client             *http.Client
 	baseURL            string
@@ -29,7 +30,7 @@ type ServiceClient struct {
 // ServiceClientConfig configures a ServiceClient.
 type ServiceClientConfig struct {
 	// BaseURL is the root URL of the target service.
-	// Example: "http://user-service:8080"
+	// Example: "http://user-service:8080".
 	BaseURL string
 
 	// Timeout is the per-request timeout. Defaults to 10 seconds.
@@ -42,26 +43,26 @@ type ServiceClientConfig struct {
 	// Defaults to 500ms.
 	RetryDelay time.Duration
 
-	// CircuitThreshold is how many consecutive failures before the
-	// circuit opens (stops sending requests). Defaults to 5.
+	// CircuitThreshold is how many consecutive failures before the circuit
+	// opens. Defaults to 5.
 	CircuitThreshold int
 
-	// CircuitCooldown is how long to wait before trying again after
+	// CircuitCooldown is how long to wait before a half-open probe after
 	// the circuit opens. Defaults to 30 seconds.
 	CircuitCooldown time.Duration
 
-	// MaxResponseSize is the maximum response body size in bytes.
-	// Applied to all responses (including raw Get/Post/Put/Delete)
-	// to prevent OOM from malicious or buggy downstream services.
-	// Default: 10MB. (CONV-06)
+	// MaxResponseSize caps response body size to protect against OOM from
+	// malicious or buggy downstream services. Default: 10 MB.
 	MaxResponseSize int64
 
-	// RetryNonIdempotent controls whether non-idempotent methods
-	// (POST, PATCH) are retried on 5xx responses. Default: false
-	// (only idempotent methods per RFC 9110 are retried). Set to
-	// true if your POST endpoints are designed to be idempotent
-	// (e.g., with idempotency keys).
+	// RetryNonIdempotent enables retrying POST/PATCH on 5xx. Default
+	// false — only idempotent methods (per RFC 9110) are retried. Set
+	// true if your non-idempotent endpoints use idempotency keys.
 	RetryNonIdempotent bool
+
+	// Clock returns the current time. Defaults to time.Now. Tests inject
+	// a fake clock to exercise circuit breaker cooldown deterministically.
+	Clock func() time.Time
 }
 
 // NewServiceClient creates a new HTTP client for calling another service.
@@ -82,7 +83,10 @@ func NewServiceClient(cfg ServiceClientConfig) *ServiceClient {
 		cfg.CircuitCooldown = 30 * time.Second
 	}
 	if cfg.MaxResponseSize == 0 {
-		cfg.MaxResponseSize = 10 << 20 // 10MB
+		cfg.MaxResponseSize = 10 << 20
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
 	}
 
 	return &ServiceClient{
@@ -95,7 +99,7 @@ func NewServiceClient(cfg ServiceClientConfig) *ServiceClient {
 		retryDelay:         cfg.RetryDelay,
 		maxResponseSize:    cfg.MaxResponseSize,
 		retryNonIdempotent: cfg.RetryNonIdempotent,
-		circuit:            newCircuitBreaker(cfg.CircuitThreshold, cfg.CircuitCooldown),
+		circuit:            newCircuitBreaker(cfg.CircuitThreshold, cfg.CircuitCooldown, cfg.Clock),
 	}
 }
 
@@ -120,8 +124,6 @@ func (sc *ServiceClient) Delete(ctx context.Context, path string) (*http.Respons
 }
 
 // GetJSON performs a GET and decodes the JSON response into target.
-// The response body is limited to MaxResponseSize to prevent OOM
-// from malicious downstream services. (CONV-06)
 func (sc *ServiceClient) GetJSON(ctx context.Context, path string, target any) error {
 	resp, err := sc.Get(ctx, path)
 	if err != nil {
@@ -130,23 +132,19 @@ func (sc *ServiceClient) GetJSON(ctx context.Context, path string, target any) e
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		// Drain body to enable connection reuse, but limit the drain.
+		// Drain (limited) so the connection can be reused.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("service returned %d", resp.StatusCode)
 	}
 
-	// Body is already limited to MaxResponseSize by do(). (CONV-06)
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-// do executes the HTTP request with retries and circuit breaking.
 func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	// Validate path starts with "/" to prevent URL manipulation.
 	if !strings.HasPrefix(path, "/") {
 		return nil, fmt.Errorf("path must start with \"/\", got %q", path)
 	}
 
-	// Check circuit breaker.
 	if !sc.circuit.allow() {
 		return nil, fmt.Errorf("circuit breaker open for %s", sc.baseURL)
 	}
@@ -156,7 +154,7 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 	var lastErr error
 	for attempt := 0; attempt <= sc.maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff with jitter to prevent thundering herd.
+			// Exponential backoff with jitter to avoid thundering herd.
 			base := sc.retryDelay * time.Duration(1<<(attempt-1))
 			delay := base/2 + time.Duration(rand.Int64N(int64(base/2+1)))
 			select {
@@ -172,7 +170,7 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 			if err != nil {
 				return nil, fmt.Errorf("marshal body: %w", err)
 			}
-			bodyReader = strings.NewReader(string(data))
+			bodyReader = bytes.NewReader(data)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
@@ -180,7 +178,6 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 			return nil, fmt.Errorf("create request: %w", err)
 		}
 
-		// Propagate headers from context (request ID, trace ID).
 		if rid := RequestID(ctx); rid != "" {
 			req.Header.Set("X-Request-ID", rid)
 		}
@@ -199,13 +196,11 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 			continue
 		}
 
-		// Don't retry client errors (4xx), only server errors (5xx).
+		// Client errors (4xx) are not retried.
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
 			sc.circuit.recordFailure()
-			// Only retry idempotent methods by default. Non-idempotent
-			// methods (POST, PATCH) could cause duplicate side effects.
 			if !isIdempotent(method) && !sc.retryNonIdempotent {
 				break
 			}
@@ -213,8 +208,6 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 		}
 
 		sc.circuit.recordSuccess()
-		// Limit response body to prevent OOM from malicious or
-		// buggy downstream services. (CONV-06)
 		resp.Body = newLimitedReadCloser(resp.Body, sc.maxResponseSize)
 		return resp, nil
 	}
@@ -223,24 +216,11 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 		sc.maxRetries+1, method, url, lastErr)
 }
 
-// circuitBreaker prevents cascading failures by stopping requests to
-// a service that's consistently failing. It uses a simple consecutive
-// failure counter.
-//
-// States:
-//   - Closed (normal): requests pass through
-//   - Open (tripped): requests rejected immediately
-//   - Half-open (after cooldown): ONE request allowed to test recovery;
-//     all others are rejected until the probe succeeds or fails.
-//
-// Note on half-open behavior: exactly one probe request is permitted.
-// If that probe is slow (e.g., the downstream service is responding
-// slowly rather than failing fast), all other requests are rejected
-// until the probe completes. In the worst case, recovery speed is
-// gated by the per-request Timeout rather than the CircuitCooldown.
-// This is a deliberate trade-off to prevent the thundering herd
-// problem where many goroutines all probe a recovering service
-// simultaneously and overwhelm it again.
+// circuitBreaker trips after a configurable number of consecutive failures.
+// In the half-open state, exactly one probe is allowed through; subsequent
+// requests are rejected until the probe completes. This is a deliberate
+// trade-off against the thundering-herd problem — recovery latency is
+// bounded by the per-request timeout, not the cooldown.
 type circuitBreaker struct {
 	mu          sync.Mutex
 	failures    int
@@ -248,13 +228,18 @@ type circuitBreaker struct {
 	cooldown    time.Duration
 	lastFailure time.Time
 	state       string // "closed", "open", "half-open"
+	now         func() time.Time
 }
 
-func newCircuitBreaker(threshold int, cooldown time.Duration) *circuitBreaker {
+func newCircuitBreaker(threshold int, cooldown time.Duration, now func() time.Time) *circuitBreaker {
+	if now == nil {
+		now = time.Now
+	}
 	return &circuitBreaker{
 		threshold: threshold,
 		cooldown:  cooldown,
 		state:     "closed",
+		now:       now,
 	}
 }
 
@@ -266,17 +251,12 @@ func (cb *circuitBreaker) allow() bool {
 	case "closed":
 		return true
 	case "open":
-		// Check if cooldown has elapsed.
-		if time.Since(cb.lastFailure) > cb.cooldown {
-			// Transition to half-open and allow exactly one probe.
+		if cb.now().Sub(cb.lastFailure) > cb.cooldown {
 			cb.state = "half-open"
 			return true
 		}
 		return false
 	case "half-open":
-		// Already probing — reject additional requests until the
-		// probe completes. This prevents the thundering herd problem
-		// where many goroutines all probe simultaneously.
 		return false
 	}
 	return true
@@ -293,7 +273,7 @@ func (cb *circuitBreaker) recordFailure() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.failures++
-	cb.lastFailure = time.Now()
+	cb.lastFailure = cb.now()
 	if cb.failures >= cb.threshold {
 		cb.state = "open"
 	}
@@ -310,8 +290,7 @@ func isIdempotent(method string) bool {
 	}
 }
 
-// limitedReadCloser wraps a response body with a size limit to prevent
-// OOM from malicious or buggy downstream services. (CONV-06)
+// limitedReadCloser wraps a response body with a size limit.
 type limitedReadCloser struct {
 	io.Reader
 	closer io.Closer
