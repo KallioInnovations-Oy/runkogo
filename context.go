@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,8 @@ const (
 	ctxKeyUserID
 	ctxKeyTraceID
 	ctxKeyClientIP
+	ctxKeyTraceparent
+	ctxKeyTracestate
 )
 
 // RequestID extracts the request ID from the context, or "" if unset.
@@ -74,6 +77,31 @@ func WithClientIP(ctx context.Context, ip string) context.Context {
 	return context.WithValue(ctx, ctxKeyClientIP, ip)
 }
 
+// Traceparent extracts the W3C Trace Context traceparent header value from
+// the context, or "" if the incoming request carried none.
+//
+// RunkoGO does not create spans — it forwards this value unchanged so a
+// service built on it does not sever a trace passing through. See CONV-12.
+func Traceparent(ctx context.Context) string {
+	val, _ := ctx.Value(ctxKeyTraceparent).(string)
+	return val
+}
+
+func WithTraceparent(ctx context.Context, tp string) context.Context {
+	return context.WithValue(ctx, ctxKeyTraceparent, tp)
+}
+
+// Tracestate extracts the W3C tracestate value from the context, or "" if
+// the incoming request carried none.
+func Tracestate(ctx context.Context) string {
+	val, _ := ctx.Value(ctxKeyTracestate).(string)
+	return val
+}
+
+func WithTracestate(ctx context.Context, ts string) context.Context {
+	return context.WithValue(ctx, ctxKeyTracestate, ts)
+}
+
 // RequestIDFromHeader extracts a valid X-Request-ID or generates a fresh
 // one. The header value is validated (alphanumeric, hyphens, underscores,
 // max 64 chars); invalid values are silently replaced to prevent log
@@ -89,6 +117,32 @@ func RequestIDFromHeader(r *http.Request) string {
 // TraceIDFromHeader extracts a validated trace ID, or "" if absent/invalid.
 func TraceIDFromHeader(r *http.Request) string {
 	return sanitizeID(r.Header.Get("X-Trace-ID"))
+}
+
+// TraceparentFromHeader extracts a valid W3C traceparent, or "" if the
+// header is absent, malformed, or ambiguous.
+//
+// A request carrying more than one traceparent has no single correct
+// answer, and taking the first would let a client prepend its own ahead of
+// the real one — the same spoofing shape that X-Forwarded-For is hardened
+// against. The spec says to discard in that case, so it is discarded.
+func TraceparentFromHeader(r *http.Request) string {
+	values := r.Header.Values("traceparent")
+	if len(values) != 1 {
+		return ""
+	}
+	return sanitizeTraceparent(values[0])
+}
+
+// TracestateFromHeader extracts the companion tracestate value, or "" if
+// absent or malformed. Multiple header lines are joined, which the spec
+// permits for this header.
+func TracestateFromHeader(r *http.Request) string {
+	values := r.Header.Values("tracestate")
+	if len(values) == 0 {
+		return ""
+	}
+	return sanitizeTracestate(strings.Join(values, ","))
 }
 
 // generateID returns a random 32-character hex string (128 bits). Request

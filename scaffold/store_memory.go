@@ -42,7 +42,7 @@ func NewMemoryStore(seed bool) *MemoryStore {
 	return s
 }
 
-func (s *MemoryStore) List(ctx context.Context) ([]User, error) {
+func (s *MemoryStore) ListPage(ctx context.Context, limit, offset int) ([]User, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -56,7 +56,22 @@ func (s *MemoryStore) List(ctx context.Context) ([]User, error) {
 		return users[i].CreatedAt.After(users[j].CreatedAt)
 	})
 
-	return users, nil
+	total := len(users)
+
+	// Clamp defensively. A negative or past-the-end window yields an empty
+	// page rather than panicking on the slice.
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := total
+	if limit >= 0 && offset+limit < total {
+		end = offset + limit
+	}
+
+	return users[offset:end], total, nil
 }
 
 func (s *MemoryStore) GetByID(ctx context.Context, id string) (User, error) {

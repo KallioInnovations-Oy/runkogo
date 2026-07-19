@@ -100,7 +100,10 @@ func (pr *proxyResolver) isTrusted(ipStr string) bool {
 //  2. If not trusted, return RemoteAddr (the client connected directly).
 //  3. If trusted, walk X-Forwarded-For right-to-left and return the
 //     first non-trusted IP. This is the real client.
-//  4. If all IPs in the chain are trusted, return the leftmost
+//  4. If an entry cannot be parsed as an IP, the chain is corrupt from
+//     that point leftward; return RemoteAddr rather than trusting any
+//     entry beyond it.
+//  5. If all IPs in the chain are trusted, return the leftmost
 //     (entire path is internal infrastructure).
 func (pr *proxyResolver) resolveClientIP(remoteAddr string, xForwardedFor string) string {
 	directIP := stripPort(remoteAddr)
@@ -131,14 +134,22 @@ func (pr *proxyResolver) resolveClientIP(remoteAddr string, xForwardedFor string
 		if ips[i] == "" {
 			continue
 		}
-		// Validate that the entry is a real IP address.
-		// Skip garbage entries injected by malicious clients.
-		if net.ParseIP(ips[i]) == nil {
-			continue
+
+		// Some proxies append the "ip:port" form; normalize before parsing
+		// so a legitimate chain is not mistaken for a corrupted one.
+		entry := stripPort(ips[i])
+
+		// An entry we cannot parse means the chain is no longer verifiable
+		// from here leftward — every remaining entry is attacker-reachable.
+		// Terminate rather than skip: skipping would walk past the last
+		// genuine hop into fully client-controlled territory.
+		if net.ParseIP(entry) == nil {
+			return directIP
 		}
-		if !pr.isTrusted(ips[i]) {
-			return ips[i]
+		if !pr.isTrusted(entry) {
+			return entry
 		}
+		ips[i] = entry
 	}
 
 	// Entire chain is trusted infrastructure — return leftmost.

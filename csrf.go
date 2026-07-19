@@ -45,6 +45,11 @@ type CSRFConfig struct {
 
 // CSRF returns a double-submit-cookie CSRF middleware.
 //
+// CONV-14: this is a convention, not automatic behavior — register it on
+// your cookie-authenticated routes. Bearer-token APIs should set
+// SkipAuthHeader instead; browsers do not attach Authorization headers
+// automatically, so those endpoints are not CSRF-reachable.
+//
 // On safe methods (GET, HEAD, OPTIONS) the middleware issues a fresh token
 // as a cookie if one is not already present. On unsafe methods it requires
 // the header to match the cookie using a constant-time comparison.

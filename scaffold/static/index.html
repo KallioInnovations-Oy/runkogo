@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RunkoGO — {{.ServiceName}}</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@400;500;700&display=swap');
-
+  /* System font stacks only. An @import from a CDN would contradict the
+     claim that everything ships inside this binary, break the page in an
+     air-gapped deployment, and require loosening the CSP the framework
+     spends effort setting. */
   :root {
     --bg: #0e1117;
     --surface: #161b22;
@@ -20,8 +22,8 @@
     --green-dim: #1a3a2a;
     --yellow: #d29922;
     --red: #f85149;
-    --mono: 'JetBrains Mono', monospace;
-    --sans: 'DM Sans', system-ui, sans-serif;
+    --mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -325,75 +327,121 @@
 
   <div class="hero">
     <h1>Runko<span class="accent">GO</span></h1>
-    <p>Zero-dependency Go framework for JSON APIs and microservice clusters. This scaffold is your binary — everything you see ships inside it.</p>
+    <p>Zero-dependency Go starting point for JSON APIs and microservice clusters.
+       This scaffold is your binary — this page ships inside it, with no web
+       fonts, no CDN, and no subresource it needs to fetch. It renders
+       identically on an air-gapped host.</p>
+    <p style="margin-top:0.75rem;font-size:0.95rem">
+       It does not ship everything a production service needs. What it promises
+       is that every claim it makes is <em>Enforced</em>, a stated
+       <em>Convention</em>, or explicitly <em>Deferred</em> — and the probes
+       below let you check rather than trust.</p>
     <div class="hero-meta">
       <span>go {{.GoVersion}}</span>
-      <span>0 deps</span>
+      <span>0 dependencies</span>
       <span>{{.BinarySize}}</span>
-      <span>{{.FileCount}} files</span>
     </div>
   </div>
 
-  <!-- LIVE API TESTER -->
+  <!-- CONVENTION PROBES -->
   <section>
-    <h2>// try it — live API tester</h2>
+    <h2>// prove it — every convention, live</h2>
     <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
-      Click any endpoint to fire a real request against this running instance.
+      Each row fires a real request against this running instance. They are
+      not a feature tour — they are how you falsify the claims further down
+      the page. Open the <strong>headers</strong> panel after any probe:
+      the security headers and request ID are there on <em>every</em>
+      response, including the failures.
     </p>
 
     <div class="tester">
-      <div class="tester-row" onclick="apiCall('GET', '/healthz')">
+      <div class="tester-row" onclick="probe('GET', '/healthz', {})">
         <span class="method method-get">GET</span>
         <span class="tester-path">/healthz</span>
-        <span class="tester-desc">Liveness check</span>
+        <span class="tester-desc">Liveness — always 200 while the process runs</span>
         <button class="tester-go">run →</button>
       </div>
-      <div class="tester-row" onclick="apiCall('GET', '/readyz')">
+      <div class="tester-row" onclick="probe('GET', '/readyz', {})">
         <span class="method method-get">GET</span>
         <span class="tester-path">/readyz</span>
-        <span class="tester-desc">Readiness check</span>
+        <span class="tester-desc">Readiness — runs the registered store check</span>
         <button class="tester-go">run →</button>
       </div>
-      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users', true)">
+
+      <div class="tester-row" onclick="probe('GET', '/does-not-exist', {conv:'CONV-04 · CONV-08'})">
         <span class="method method-get">GET</span>
-        <span class="tester-path">/api/v1/users</span>
-        <span class="tester-desc">List users (authed)</span>
+        <span class="tester-path">/does-not-exist</span>
+        <span class="tester-desc">404 is JSON, and still carries security headers + request ID</span>
         <button class="tester-go">run →</button>
       </div>
-      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users/1', true)">
-        <span class="method method-get">GET</span>
-        <span class="tester-path">/api/v1/users/1</span>
-        <span class="tester-desc">Get user by ID</span>
-        <button class="tester-go">run →</button>
-      </div>
-      <div class="tester-row" onclick="apiCall('POST', '/api/v1/users', true, JSON.stringify({name:'RunkoGO User',email:'runko@example.com'}))">
-        <span class="method method-post">POST</span>
-        <span class="tester-path">/api/v1/users</span>
-        <span class="tester-desc">Create user</span>
-        <button class="tester-go">run →</button>
-      </div>
-      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users', false)">
-        <span class="method method-get">GET</span>
-        <span class="tester-path">/api/v1/users</span>
-        <span class="tester-desc">No auth → 401</span>
-        <button class="tester-go">run →</button>
-      </div>
-      <div class="tester-row" onclick="apiCall('GET', '/api/v1/users/999', true)">
-        <span class="method method-get">GET</span>
-        <span class="tester-path">/api/v1/users/999</span>
-        <span class="tester-desc">Not found → 404</span>
-        <button class="tester-go">run →</button>
-      </div>
-      <div class="tester-row" onclick="apiCall('DELETE', '/api/v1/users/1', true)">
+      <div class="tester-row" onclick="probe('DELETE', '/healthz', {conv:'CONV-04 · CONV-08'})">
         <span class="method method-del">DEL</span>
-        <span class="tester-path">/api/v1/users/1</span>
-        <span class="tester-desc">Delete user → 204</span>
+        <span class="tester-path">/healthz</span>
+        <span class="tester-desc">405 with an Allow header — same envelope</span>
         <button class="tester-go">run →</button>
       </div>
-      <div class="tester-row" onclick="apiCall('POST', '/api/v1/users', true, JSON.stringify({name:'Duplicate',email:'demo@example.com'}))">
+
+      <div class="tester-row" onclick="probe('GET', '/api/v1/users', {conv:'CONV-01'})">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">No credentials → 401</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probe('GET', '/api/v1/users?page=1&amp;per_page=2', {auth:true})">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">Authenticated, paginated</span>
+        <button class="tester-go">run →</button>
+      </div>
+
+      <div class="tester-row" onclick="probe('POST', '/api/v1/users', {auth:true, conv:'CONV-15', body:{name:'',email:''}})">
         <span class="method method-post">POST</span>
         <span class="tester-path">/api/v1/users</span>
-        <span class="tester-desc">Duplicate email → 409</span>
+        <span class="tester-desc">Empty fields → 422 naming which ones</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probe('POST', '/api/v1/users', {auth:true, conv:'CONV-15', body:{name:'Dup',email:'demo@example.com'}})">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">Duplicate email → 409, mapped once in storeError</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probe('GET', '/api/v1/users/no-such-id', {auth:true, conv:'CONV-03 · CONV-15'})">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/api/v1/users/no-such-id</span>
+        <span class="tester-desc">404 with no trace of the internal cause</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probe('POST', '/api/v1/users', {auth:true, conv:'CONV-02', raw:'{&quot;name&quot;:&quot;A&quot;,&quot;email&quot;:&quot;a@b.c&quot;,&quot;is_admin&quot;:true}'})">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/api/v1/users</span>
+        <span class="tester-desc">Unknown field <code>is_admin</code> → 400, not silently ignored</span>
+        <button class="tester-go">run →</button>
+      </div>
+
+      <div class="tester-row" onclick="probeCSRF(false)">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/app/profile</span>
+        <span class="tester-desc">Cookie auth, no CSRF token → 403</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probeCSRF(true)">
+        <span class="method method-post">POST</span>
+        <span class="tester-path">/app/profile</span>
+        <span class="tester-desc">Same request with the token echoed → 200</span>
+        <button class="tester-go">run →</button>
+      </div>
+
+      <div class="tester-row" onclick="probe('GET', '/debug/vars', {auth:true, conv:'CONV-12'})">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/debug/vars</span>
+        <span class="tester-desc">stdlib expvar — the scaffold mounts it, the framework ships none</span>
+        <button class="tester-go">run →</button>
+      </div>
+      <div class="tester-row" onclick="probeRequestID()">
+        <span class="method method-get">GET</span>
+        <span class="tester-path">/healthz</span>
+        <span class="tester-desc">Injected <code>X-Request-ID</code> → sanitized, not echoed</span>
         <button class="tester-go">run →</button>
       </div>
     </div>
@@ -404,6 +452,7 @@
         <span id="resp-time" style="color:var(--text-muted)"></span>
         <button class="toggle-headers" onclick="toggleHeaders()">headers ▾</button>
       </div>
+      <div id="resp-note" style="padding:0.6rem 1.25rem; font-size:0.8rem; color:var(--text-muted); border-bottom:1px solid var(--border); display:none;"></div>
       <div class="response-body" id="resp-body"></div>
       <div class="response-headers-list" id="resp-headers"></div>
     </div>
@@ -422,68 +471,118 @@
         <p>Service-to-service client with retries, circuit breaking, and automatic request ID / trace ID propagation.</p>
       </div>
       <div class="card">
-        <h3>SPA & mobile backends</h3>
-        <p>CORS, rate limiting, security headers, and Bearer token auth patterns ready for frontend consumption.</p>
+        <h3>SPA &amp; mobile backends</h3>
+        <p>CORS, rate limiting, security headers, CSRF for cookie sessions, and Bearer-token patterns ready for frontend consumption.</p>
       </div>
       <div class="card">
         <h3>Internal tools</h3>
-        <p>Health checks for orchestrators, structured logging for observability, and env-based config for 12-factor deploys.</p>
+        <p>Health checks for orchestrators, structured logging, and env-based config for 12-factor deploys.</p>
+      </div>
+      <div class="card">
+        <h3>What you still build yourself</h3>
+        <p>Auth, validation, metrics, migrations, distributed rate limiting. Handlers are plain <code>http.HandlerFunc</code>, so any <code>net/http</code> middleware composes without an adapter.</p>
       </div>
     </div>
   </section>
 
-  <!-- ARCHITECTURE -->
+  <!-- HOW TO -->
   <section>
-    <h2>// framework modules</h2>
-    <div class="modules">
-      <div class="card">
-        <h3>app.go</h3>
-        <p>Lifecycle: startup hooks → serve → signal → drain → shutdown hooks. TLS support, HOST/PORT config, port validation.</p>
-      </div>
-      <div class="card">
-        <h3>router.go</h3>
-        <p>Go 1.22 ServeMux with route groups and middleware chains. <code>app.Router.Group("/api", auth)</code></p>
-      </div>
-      <div class="card">
-        <h3>middleware.go</h3>
-        <p>Recovery, body limit, request ID, client IP, logger with query redaction, CORS, rate limiting.</p>
-      </div>
-      <div class="card">
-        <h3>security.go</h3>
-        <p>Security headers: nosniff, frame deny, cache-control, permissions policy, optional HSTS.</p>
-      </div>
-      <div class="card">
-        <h3>proxy.go</h3>
-        <p>Trusted proxy resolver. Right-to-left XFF walking. Secure by default — headers ignored without config.</p>
-      </div>
-      <div class="card">
-        <h3>client.go</h3>
-        <p>Service-to-service HTTP with retries, exponential backoff, circuit breaker, header propagation.</p>
-      </div>
-      <div class="card">
-        <h3>response.go</h3>
-        <p>JSON, errors, pagination, body decoding with trailing data check and size limits.</p>
-      </div>
-      <div class="card">
-        <h3>hosts.go</h3>
-        <p>Allowed host validation. Prevents host header injection for routing, caching, and password reset attacks.</p>
-      </div>
-      <div class="card">
-        <h3>logger.go</h3>
-        <p>Structured JSON logging via <code>slog</code>. Context-aware: automatically includes request ID, client IP, user ID.</p>
-      </div>
-      <div class="card">
-        <h3>config.go</h3>
-        <p>Typed env vars: <code>MustGet</code>, <code>GetInt</code>, <code>GetBool</code>, <code>GetDuration</code>, <code>GetSlice</code>. Fail fast.</p>
-      </div>
-      <div class="card">
-        <h3>context.go</h3>
-        <p>Request-scoped values: request ID, client IP, user ID, trace ID. Flows through every function call.</p>
-      </div>
-      <div class="card">
-        <h3>sanitize.go</h3>
-        <p>Input sanitization. External IDs validated: <code>[a-zA-Z0-9_-]</code> max 64 chars. Rejects injection attempts.</p>
-      </div>
+    <h2>// how to build the four things you actually need</h2>
+    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+      Each snippet names the file it lives in, so you can read the real
+      thing rather than a simplified version. All of it is running in this
+      binary except the Postgres swap in step 3, which is commented out in
+      <code>main.go</code> — the store implementation itself compiles and is
+      type-checked in CI.
+    </p>
+
+    <div class="card">
+      <h3>1 · An endpoint that fails correctly <span style="color:var(--text-muted);font-weight:400">— main.go</span></h3>
+      <p style="margin-bottom:0.75rem">
+        The decision about what a client may see is made where the error is
+        created. Handlers do not repeat it.
+      </p>
+<pre><span class="cmt">// store_memory.go — the store returns domain errors, not HTTP ones.</span>
+<span class="kw">return</span> User{}, ErrNotFound
+
+<span class="cmt">// main.go — mapped once, at the boundary.</span>
+<span class="kw">func</span> <span class="fn">storeError</span>(err <span class="kw">error</span>) <span class="kw">error</span> {
+    <span class="kw">switch</span> {
+    <span class="kw">case</span> errors.<span class="fn">Is</span>(err, ErrNotFound):
+        <span class="kw">return</span> runko.<span class="fn">NotFound</span>(<span class="str">"User not found"</span>).<span class="fn">Wrap</span>(err)
+    <span class="kw">case</span> errors.<span class="fn">Is</span>(err, ErrConflict):
+        <span class="kw">return</span> runko.<span class="fn">Conflict</span>(<span class="str">"A user with this email already exists"</span>).<span class="fn">Wrap</span>(err)
+    <span class="kw">default</span>:
+        <span class="kw">return</span> err <span class="cmt">// becomes a generic 500 — never leaks the driver message</span>
+    }
+}
+
+<span class="cmt">// Every handler then ends the same way.</span>
+<span class="kw">if</span> err != <span class="kw">nil</span> {
+    runko.<span class="fn">RespondError</span>(w, r, h.logger, <span class="fn">storeError</span>(err))
+    <span class="kw">return</span>
+}</pre>
+      <p style="font-size:0.85rem">Probe it above: <code>/api/v1/users/no-such-id</code> and the duplicate-email POST.</p>
+    </div>
+
+    <div class="card">
+      <h3>2 · Middleware in an order that actually holds <span style="color:var(--text-muted);font-weight:400">— main.go</span></h3>
+      <p style="margin-bottom:0.75rem">
+        Root middleware wraps the router itself, so it covers 404s, 405s and
+        redirects too. But middleware that <em>answers</em> a request skips
+        everything after it — order is yours to get right.
+      </p>
+<pre>app.Router.<span class="fn">Use</span>(
+    runko.<span class="fn">Recovery</span>(app.Logger),
+    runko.<span class="fn">BodyLimit</span>(1&lt;&lt;20),
+    runko.<span class="fn">DefaultSecurityHeaders</span>(),
+    runko.<span class="fn">RequestIDMiddleware</span>(),
+    runko.<span class="fn">ClientIPMiddleware</span>(app.Proxy),
+    runko.<span class="fn">Logger</span>(app.Logger),   <span class="cmt">// after RequestID/ClientIP: they clone the</span>
+                                <span class="cmt">// request, and the router stamps the clone</span>
+    runko.<span class="fn">RateLimit</span>(...),        <span class="cmt">// after Logger: it answers 429s itself,</span>
+    runko.<span class="fn">CORS</span>(...),             <span class="cmt">// and CORS answers preflights itself</span>
+)</pre>
+      <p style="font-size:0.85rem">Put CORS first and every preflight goes unlogged. Put Logger first and you lose the matched route pattern.</p>
+    </div>
+
+    <div class="card">
+      <h3>3 · Swapping the database without touching a handler <span style="color:var(--text-muted);font-weight:400">— store.go</span></h3>
+      <p style="margin-bottom:0.75rem">
+        Handlers depend on the <code>UserStore</code> interface. Pagination
+        lives <em>in</em> that interface, so the SQL implementation pushes
+        <code>LIMIT/OFFSET</code> into the query instead of loading the table.
+      </p>
+<pre><span class="kw">type</span> UserStore <span class="kw">interface</span> {
+    <span class="fn">ListPage</span>(ctx context.Context, limit, offset <span class="kw">int</span>) ([]User, <span class="kw">int</span>, <span class="kw">error</span>)
+    <span class="fn">GetByID</span>(ctx context.Context, id <span class="kw">string</span>) (User, <span class="kw">error</span>)
+    <span class="fn">Create</span>(ctx context.Context, name, email <span class="kw">string</span>) (User, <span class="kw">error</span>)
+    <span class="fn">Delete</span>(ctx context.Context, id <span class="kw">string</span>) <span class="kw">error</span>
+    <span class="fn">Ping</span>(ctx context.Context) <span class="kw">error</span>   <span class="cmt">// wired to /readyz</span>
+    <span class="fn">Close</span>() <span class="kw">error</span>                     <span class="cmt">// wired to OnShutdown</span>
+}
+
+<span class="cmt">// One line in main() is the whole swap:</span>
+store, err := <span class="fn">NewPostgresStore</span>(ctx, <span class="str">"pgx"</span>, databaseURL)</pre>
+      <p style="font-size:0.85rem"><code>store_postgres.go</code> compiles against <code>database/sql</code> and is type-checked in CI — it is a reference implementation, not a commented-out guess.</p>
+    </div>
+
+    <div class="card">
+      <h3>4 · Surviving a rolling deploy <span style="color:var(--text-muted);font-weight:400">— main.go, ordering from app.go</span></h3>
+      <p style="margin-bottom:0.75rem">
+        Readiness flips to false first, then the server keeps serving while
+        the load balancer notices. Closing the listener immediately is what
+        produces 502s on every deploy.
+      </p>
+<pre><span class="cmt">// 1. /readyz starts failing      2. keep serving for PreStopDelay (5s)</span>
+<span class="cmt">// 3. drain in flight             4. run shutdown hooks</span>
+
+app.<span class="fn">AddHealthCheck</span>(<span class="str">"store"</span>, 5*time.Second, store.Ping)
+app.<span class="fn">OnShutdown</span>(<span class="kw">func</span>(ctx context.Context) <span class="kw">error</span> { <span class="kw">return</span> store.<span class="fn">Close</span>() })</pre>
+      <p style="font-size:0.85rem">
+        Budget: <code>PreStopDelay + ShutdownTimeout + ShutdownTimeout</code> = 35s by default,
+        which exceeds Kubernetes' 30s grace period. Raise the grace period or lower the timeouts — see CONV-13.
+      </p>
     </div>
   </section>
 
@@ -493,7 +592,7 @@
 <pre><span class="kw">package</span> main
 
 <span class="kw">import</span> (
-    <span class="str">"time"</span>
+    <span class="str">"net/http"</span>
     runko <span class="str">"github.com/kallioinnovations/runkogo"</span>
 )
 
@@ -513,9 +612,10 @@
     )
 
     <span class="cmt">// Routes.</span>
-    app.Router.<span class="fn">HandleFunc</span>(<span class="str">"GET /hello"</span>, <span class="kw">func</span>(w, r) {
-        runko.<span class="fn">JSON</span>(w, 200, runko.Map{<span class="str">"msg"</span>: <span class="str">"hello"</span>})
-    })
+    app.Router.<span class="fn">HandleFunc</span>(<span class="str">"GET /hello"</span>,
+        <span class="kw">func</span>(w http.ResponseWriter, r *http.Request) {
+            runko.<span class="fn">JSON</span>(w, 200, runko.Map{<span class="str">"msg"</span>: <span class="str">"hello"</span>})
+        })
 
     <span class="cmt">// Protected group.</span>
     api := app.Router.<span class="fn">Group</span>(<span class="str">"/api/v1"</span>, authMiddleware)
@@ -525,40 +625,106 @@
 }</pre>
   </section>
 
-  <!-- SECURITY CONVENTIONS -->
+  <!-- CONVENTIONS -->
   <section>
-    <h2>// security conventions</h2>
+    <h2>// the conventions, and what backs each one</h2>
+    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+      <strong style="color:var(--green)">Enforced</strong> — the framework guarantees it, with a test that fails if it breaks.
+      <strong style="color:var(--yellow)">Convention</strong> — you must register or do something; it says what.
+      <strong>Deferred</strong> — deliberately out of scope, with the alternative named.
+      <br>
+      <code>CONVENTIONS.md</code> is the canonical list, and a test fails the
+      build if this page, the docs, or the code drift from it.
+    </p>
     <div class="conv">
       <span class="conv-id">CONV-01</span>
-      <div class="conv-text"><strong>Secure by default.</strong> X-Forwarded-For ignored unless TrustedProxies configured. CORS denied unless origins listed.</div>
+      <div class="conv-text"><strong>Secure by default, opt in to trust.</strong> X-Forwarded-For ignored unless TrustedProxies is set; CORS denies unless listed. All XFF lines are joined, and an unparseable entry ends the walk. <code>X-Real-IP</code> is not read.
+        <span class="conv-state" data-conv="CONV-01" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-02</span>
-      <div class="conv-text"><strong>Sanitize external input.</strong> Request IDs validated: <code>[a-zA-Z0-9_-]</code> max 64 chars. Injection attempts silently replaced.</div>
+      <div class="conv-text"><strong>External input is sanitized.</strong> Request and trace IDs accept only <code>[a-zA-Z0-9_-]</code>, max 64 chars. Bodies reject unknown fields and trailing data.
+        <span class="conv-state" data-conv="CONV-02" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-03</span>
-      <div class="conv-text"><strong>No internal details exposed.</strong> Health checks show pass/fail only. Error messages never contain hostnames or connection strings.</div>
+      <div class="conv-text"><strong>No internal detail reaches a client.</strong> <code>Error</code> takes only a public code and message. Health checks expose names, not error text.
+        <span class="conv-state" data-conv="CONV-03" data-state="Enforced (API shape) + Convention (message content)" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced (API shape) + Convention (message content)]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-04</span>
-      <div class="conv-text"><strong>Security headers on every response.</strong> nosniff, frame deny, cache-control, permissions-policy. Inspect any response above.</div>
+      <div class="conv-text"><strong>Security headers on every response.</strong> You register <code>DefaultSecurityHeaders()</code>; the framework guarantees it reaches 404s, 405s and redirects too.
+        <span class="conv-state" data-conv="CONV-04" data-state="Convention (register it) + Enforced (coverage, once registered)" style="font-family:var(--mono);font-size:0.7rem;color:var(--yellow);margin-left:0.3rem">[Convention (register it) + Enforced (coverage, once registered)]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-05</span>
-      <div class="conv-text"><strong>Fail fast on danger.</strong> CORS wildcard + credentials → panic. Invalid proxy CIDR → panic. Partial TLS config → panic.</div>
+      <div class="conv-text"><strong>Dangerous config fails at startup.</strong> CORS wildcard with credentials, a bad proxy CIDR, partial TLS, empty AllowedHosts — all panic before serving.
+        <span class="conv-state" data-conv="CONV-05" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-06</span>
-      <div class="conv-text"><strong>Bounded resources.</strong> Body: 1MB. Rate limiter: 10K clients. Service responses: 10MB. Request IDs: 64 chars.</div>
+      <div class="conv-text"><strong>Resources are bounded.</strong> Headers 64 KiB, body 1 MiB, responses 10 MiB. The rate limiter evicts the least recently seen client rather than refusing new ones, and buckets IPv6 by /64.
+        <span class="conv-state" data-conv="CONV-06" data-state="Enforced (framework-level) + Convention (per-route limits)" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced (framework-level) + Convention (per-route limits)]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-07</span>
-      <div class="conv-text"><strong>Timeout everything.</strong> Server read/write/idle timeouts. Per-request service client timeout. Per-check health timeouts.</div>
+      <div class="conv-text"><strong>Everything has a timeout.</strong> Server read/write/idle, per-request client timeouts, per-check health deadlines. WriteTimeout is fixed at 30s, so SSE is out.
+        <span class="conv-state" data-conv="CONV-07" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
     </div>
     <div class="conv">
       <span class="conv-id">CONV-08</span>
-      <div class="conv-text"><strong>Audit trail.</strong> Every request logged: method, path, status, duration, request ID, resolved client IP.</div>
+      <div class="conv-text"><strong>Audit trail by default.</strong> You register <code>Logger()</code>; it then logs every request including unmatched ones, with the matched route pattern for aggregation.
+        <span class="conv-state" data-conv="CONV-08" data-state="Convention (register it) + Enforced (coverage, once registered)" style="font-family:var(--mono);font-size:0.7rem;color:var(--yellow);margin-left:0.3rem">[Convention (register it) + Enforced (coverage, once registered)]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-09</span>
+      <div class="conv-text"><strong>Sensitive data stays out of logs and URLs.</strong> No bodies, no Authorization values, no cookies. Query strings are off by default and redacted when on.
+        <span class="conv-state" data-conv="CONV-09" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-10</span>
+      <div class="conv-text"><strong>Retries are safe by default.</strong> POST is never replayed — not on 5xx, not on transport errors. The breaker is re-checked before each retry.
+        <span class="conv-state" data-conv="CONV-10" data-state="Enforced" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-11</span>
+      <div class="conv-text"><strong>Rate limiting is per-instance.</strong> Across N replicas your limit is effectively N×. Cluster-wide limiting belongs at the ingress.
+        <span class="conv-state" data-conv="CONV-11" data-state="Convention" style="font-family:var(--mono);font-size:0.7rem;color:var(--yellow);margin-left:0.3rem">[Convention]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-12</span>
+      <div class="conv-text"><strong>Observability is logs, not metrics.</strong> No metrics, no spans, no pprof. <code>Router.Mount</code> attaches your own collector; W3C traceparent and tracestate pass through unchanged.
+        <span class="conv-state" data-conv="CONV-12" data-state="Deferred (metrics and spans) + Enforced (Mount, traceparent pass-through)" style="font-family:var(--mono);font-size:0.7rem;color:var(--text-muted);margin-left:0.3rem">[Deferred (metrics and spans) + Enforced (Mount, traceparent pass-through)]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-13</span>
+      <div class="conv-text"><strong>Lifecycle is ordered; shutdown has a budget.</strong> Readiness flips before the listener closes. Shutdown hooks run even on early returns. The three phases sum — check it against your grace period.
+        <span class="conv-state" data-conv="CONV-13" data-state="Enforced (ordering) + Convention (the budget)" style="font-family:var(--mono);font-size:0.7rem;color:var(--green);margin-left:0.3rem">[Enforced (ordering) + Convention (the budget)]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-14</span>
+      <div class="conv-text"><strong>CSRF for cookie-authenticated routes.</strong> Double-submit cookie, constant-time compare. Bearer APIs do not need it — browsers do not attach Authorization automatically.
+        <span class="conv-state" data-conv="CONV-14" data-state="Convention" style="font-family:var(--mono);font-size:0.7rem;color:var(--yellow);margin-left:0.3rem">[Convention]</span>
+      </div>
+    </div>
+    <div class="conv">
+      <span class="conv-id">CONV-15</span>
+      <div class="conv-text"><strong>Errors carry their own disclosure decision.</strong> <code>AppError</code> binds status, public message and internal cause. Anything that is not an AppError renders as a generic 500.
+        <span class="conv-state" data-conv="CONV-15" data-state="Convention" style="font-family:var(--mono);font-size:0.7rem;color:var(--yellow);margin-left:0.3rem">[Convention]</span>
+      </div>
     </div>
   </section>
 
@@ -566,7 +732,7 @@
   <section>
     <h2>// deploy</h2>
 <pre><span class="cmt"># Docker (multi-stage, scratch base)</span>
-FROM golang:1.22-alpine AS build
+FROM golang:1.23-alpine AS build
 WORKDIR /app
 COPY . .
 RUN CGO_ENABLED=0 go build -o /service .
@@ -595,60 +761,128 @@ HEALTH_DETAIL=false  <span class="cmt"># Show error details in /readyz</span></p
 </div>
 
 <script>
-async function apiCall(method, path, auth, body) {
-  const panel = document.getElementById('response');
-  const statusEl = document.getElementById('resp-status');
-  const bodyEl = document.getElementById('resp-body');
-  const timeEl = document.getElementById('resp-time');
-  const headersEl = document.getElementById('resp-headers');
+// The API key is injected by the server. Hardcoding it here would publish
+// the key in the shipped binary and break every authenticated probe the
+// moment an operator sets API_KEY.
+const API_KEY = "{{.APIKey}}";
 
+const el = id => document.getElementById(id);
+
+function show(status, note, bodyText, headers, ms) {
+  const panel = el('response');
   panel.classList.add('active');
-  bodyEl.textContent = 'Loading...';
-  statusEl.textContent = '';
+
+  const statusEl = el('resp-status');
   statusEl.className = 'response-status';
-  timeEl.textContent = '';
-  headersEl.textContent = '';
-  headersEl.classList.remove('show');
+  statusEl.textContent = status.label;
+  if (status.code < 300)      statusEl.classList.add('status-2xx');
+  else if (status.code < 500) statusEl.classList.add('status-4xx');
+  else                        statusEl.classList.add('status-5xx');
 
-  const headers = {};
-  if (auth) headers['Authorization'] = 'Bearer demo-key';
-  if (body) headers['Content-Type'] = 'application/json';
+  el('resp-time').textContent = ms === null ? '' : ms + 'ms';
 
-  const start = performance.now();
-  try {
-    const resp = await fetch(path, { method, headers, body: body || undefined });
-    const elapsed = (performance.now() - start).toFixed(1);
+  const noteEl = el('resp-note');
+  if (note) { noteEl.textContent = note; noteEl.style.display = 'block'; }
+  else      { noteEl.style.display = 'none'; }
 
-    const statusCode = resp.status;
-    statusEl.textContent = method + ' ' + path + ' → ' + statusCode;
-    if (statusCode < 300) statusEl.classList.add('status-2xx');
-    else if (statusCode < 500) statusEl.classList.add('status-4xx');
-    else statusEl.classList.add('status-5xx');
+  try { el('resp-body').textContent = JSON.stringify(JSON.parse(bodyText), null, 2); }
+  catch { el('resp-body').textContent = bodyText; }
 
-    timeEl.textContent = elapsed + 'ms';
-
-    const text = await resp.text();
-    try {
-      bodyEl.textContent = JSON.stringify(JSON.parse(text), null, 2);
-    } catch {
-      bodyEl.textContent = text;
-    }
-
-    let headerLines = [];
-    resp.headers.forEach((v, k) => { headerLines.push(k + ': ' + v); });
-    headersEl.textContent = headerLines.join('\n');
-
-  } catch (err) {
-    statusEl.textContent = 'ERROR';
-    statusEl.classList.add('status-5xx');
-    bodyEl.textContent = err.message;
-  }
+  const list = el('resp-headers');
+  list.textContent = headers || '';
+  list.classList.remove('show');
 
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+function headerDump(resp) {
+  const lines = [];
+  resp.headers.forEach((v, k) => lines.push(k + ': ' + v));
+  return lines.sort().join('\n');
+}
+
+async function probe(method, path, opts) {
+  opts = opts || {};
+  el('resp-body').textContent = 'Loading…';
+
+  const headers = {};
+  if (opts.auth) headers['Authorization'] = 'Bearer ' + API_KEY;
+  let body;
+  if (opts.raw)       { body = opts.raw;                   headers['Content-Type'] = 'application/json'; }
+  else if (opts.body) { body = JSON.stringify(opts.body);  headers['Content-Type'] = 'application/json'; }
+
+  const start = performance.now();
+  try {
+    const resp = await fetch(path, { method, headers, body });
+    const ms = (performance.now() - start).toFixed(1);
+    const text = await resp.text();
+    show({ code: resp.status, label: method + ' ' + path + ' → ' + resp.status },
+         opts.conv ? 'Demonstrates ' + opts.conv + ' — open the headers panel' : '',
+         text, headerDump(resp), ms);
+  } catch (err) {
+    show({ code: 599, label: 'ERROR' }, '', err.message, '', null);
+  }
+}
+
+// CONV-14. The double-submit pattern in two clicks: the token cookie is
+// issued on a safe method, and the unsafe method requires it echoed in a
+// header. An attacker's page can make the browser send the cookie, but
+// cannot read it to build the header.
+async function probeCSRF(withToken) {
+  el('resp-body').textContent = 'Loading…';
+
+  // Safe method first — this is what issues the cookie.
+  await fetch('/app/profile', { method: 'GET' });
+
+  const headers = {};
+  let note;
+  if (withToken) {
+    const token = document.cookie.split('; ').find(c => c.startsWith('csrf_token='));
+    if (!token) {
+      show({ code: 599, label: 'CSRF cookie not found' },
+        'The cookie is Secure. Over plain HTTP on a LAN address the browser discards it; localhost works.',
+        'No csrf_token cookie available.', '', null);
+      return;
+    }
+    headers['X-CSRF-Token'] = decodeURIComponent(token.split('=')[1]);
+    note = 'Demonstrates CONV-14 — token echoed from the cookie, so the handler runs';
+  } else {
+    note = 'Demonstrates CONV-14 — the cookie alone is not enough; the header must match';
+  }
+
+  const start = performance.now();
+  const resp = await fetch('/app/profile', { method: 'POST', headers });
+  const ms = (performance.now() - start).toFixed(1);
+  const text = await resp.text();
+  show({ code: resp.status, label: 'POST /app/profile → ' + resp.status }, note, text, headerDump(resp), ms);
+}
+
+// CONV-02. Request IDs are echoed back, so an unsanitized one would put
+// attacker-controlled text into both the response headers and every log
+// line correlated with it.
+async function probeRequestID() {
+  el('resp-body').textContent = 'Loading…';
+  const injected = 'abc"};{"level":"FATAL"';
+
+  const start = performance.now();
+  try {
+    const resp = await fetch('/healthz', { headers: { 'X-Request-ID': injected } });
+    const ms = (performance.now() - start).toFixed(1);
+    const text = await resp.text();
+    const returned = resp.headers.get('X-Request-Id') || '(none)';
+
+    show({ code: resp.status, label: 'GET /healthz → ' + resp.status },
+      'Demonstrates CONV-02 — sent the request ID ' + injected + ' ; the server rejected it ' +
+      'and generated ' + returned + '. (A newline would be blocked by fetch() before it ever ' +
+      'left the browser — the server check is what protects non-browser clients.)',
+      text, headerDump(resp), ms);
+  } catch (err) {
+    show({ code: 599, label: 'ERROR' }, '', err.message, '', null);
+  }
+}
+
 function toggleHeaders() {
-  document.getElementById('resp-headers').classList.toggle('show');
+  el('resp-headers').classList.toggle('show');
 }
 </script>
 </body>

@@ -36,6 +36,7 @@ func newTestApp(t *testing.T) *App {
 		ServiceName:     "test-app",
 		ShutdownTimeout: 2 * time.Second,
 		LogLevel:        "error", // quiet during tests
+		PreStopDelay:    -1,      // no load balancer to wait for
 	})
 	return app
 }
@@ -180,7 +181,7 @@ func TestApp_ShutdownHook_Called(t *testing.T) {
 
 func TestApp_LivenessHandler(t *testing.T) {
 	app := New(Options{ServiceName: "test", LogLevel: "error"})
-	handler := app.livenessHandler()
+	handler := app.LivenessHandler()
 
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/healthz", nil)
@@ -201,7 +202,7 @@ func TestApp_ReadinessHandler_Ready_NoChecks(t *testing.T) {
 	app := New(Options{ServiceName: "test", LogLevel: "error"})
 	app.health.ready = true
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -221,7 +222,7 @@ func TestApp_ReadinessHandler_NotReady(t *testing.T) {
 	app := New(Options{ServiceName: "test", LogLevel: "error"})
 	// health.ready defaults to false
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -238,7 +239,7 @@ func TestApp_ReadinessHandler_FailingCheck(t *testing.T) {
 		return fmt.Errorf("connection refused")
 	})
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -273,7 +274,7 @@ func TestApp_ReadinessHandler_DetailMode(t *testing.T) {
 		return fmt.Errorf("connection refused")
 	})
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -298,7 +299,7 @@ func TestApp_ReadinessHandler_PassingCheck(t *testing.T) {
 		return nil // healthy
 	})
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -322,7 +323,7 @@ func TestApp_ReadinessHandler_CheckTimeout(t *testing.T) {
 		}
 	})
 
-	handler := app.readinessHandler()
+	handler := app.ReadinessHandler()
 	rec := &responseRecorder{headers: http.Header{}}
 	req, _ := http.NewRequest("GET", "/readyz", nil)
 	handler.ServeHTTP(rec, req)
@@ -438,7 +439,7 @@ type responseRecorder struct {
 	body       []byte
 }
 
-func (r *responseRecorder) Header() http.Header { return r.headers }
+func (r *responseRecorder) Header() http.Header  { return r.headers }
 func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	r.body = append(r.body, b...)

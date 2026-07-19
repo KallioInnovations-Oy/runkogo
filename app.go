@@ -22,6 +22,31 @@ import (
 // tracing headers; 16× tighter than Go's 1 MB default to shrink DoS surface.
 const defaultMaxHeaderBytes = 64 << 10
 
+// Default grace period between readiness flipping to false and the
+// listener closing. Sized for Kubernetes endpoint propagation.
+const defaultPreStopDelay = 5 * time.Second
+
+// Default server timeouts, sized for JSON APIs.
+const (
+	defaultReadTimeout       = 30 * time.Second
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultWriteTimeout      = 30 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+)
+
+// resolveTimeout maps the Options convention (0 = default, negative =
+// disabled) onto http.Server's convention (0 = no timeout).
+func resolveTimeout(configured, fallback time.Duration) time.Duration {
+	switch {
+	case configured == 0:
+		return fallback
+	case configured < 0:
+		return 0
+	default:
+		return configured
+	}
+}
+
 // App is the central application container. It manages the HTTP server
 // lifecycle, middleware chains, configuration, and graceful shutdown.
 type App struct {
@@ -36,6 +61,15 @@ type App struct {
 
 	serviceName     string
 	shutdownTimeout time.Duration
+	preStopDelay    time.Duration
+
+	readTimeout       time.Duration
+	readHeaderTimeout time.Duration
+	writeTimeout      time.Duration
+	idleTimeout       time.Duration
+
+	// handler, when set, replaces Router as the served handler.
+	handler http.Handler
 
 	onStartup  []func(ctx context.Context) error
 	onShutdown []func(ctx context.Context) error
@@ -80,11 +114,17 @@ type Options struct {
 	LogLevel string
 
 	// TrustedProxies is a list of IP addresses or CIDR ranges allowed to
-	// set forwarding headers (X-Forwarded-For, X-Real-IP). If empty (the
-	// default), forwarding headers are ignored and RemoteAddr is always
-	// used — secure by default.
+	// set X-Forwarded-For. If empty (the default), the header is ignored
+	// and RemoteAddr is always used — secure by default.
 	//
 	// Examples: "127.0.0.1", "10.0.0.0/8", "172.17.0.0/16".
+	//
+	// Only X-Forwarded-For is read. X-Real-IP is NOT consulted: configure
+	// your proxy to set X-Forwarded-For, or every request will resolve to
+	// the proxy's own address — collapsing all traffic into one rate-limit
+	// bucket and recording the balancer's IP in every audit log line.
+	//
+	// CONV-01: secure by default, explicit opt-in for trust.
 	TrustedProxies []string
 
 	// TLSCert and TLSKey are paths to a PEM-encoded cert and key. When both
@@ -104,6 +144,89 @@ type Options struct {
 	// while rejecting abusive payloads. Raise for SSO-heavy deployments
 	// with large SAML cookies.
 	MaxHeaderBytes int
+
+	// PreStopDelay is how long the server keeps accepting requests after
+	// readiness flips to false, before the listener closes.
+	//
+	// Orchestrators remove a pod from the load balancer asynchronously:
+	// /readyz starts failing immediately, but endpoint propagation takes
+	// seconds. Closing the listener the moment readiness flips means the
+	// balancer is still routing to a socket that now refuses connections,
+	// which surfaces as 502s on every rolling deploy. This delay covers
+	// that window.
+	//
+	// Defaults to 5 seconds. Set to a negative value to disable — correct
+	// for tests and for single-instance deployments with no load balancer
+	// in front.
+	//
+	// SHUTDOWN BUDGET — read this before tuning either timeout.
+	//
+	// Shutdown runs three phases in sequence, and the worst case is their
+	// sum, not the larger of them:
+	//
+	//	PreStopDelay + ShutdownTimeout (drain) + ShutdownTimeout (hooks)
+	//
+	// With the defaults that is 5s + 15s + 15s = 35s. Kubernetes defaults
+	// terminationGracePeriodSeconds to 30, so a worst-case shutdown is
+	// SIGKILLed partway through the shutdown hooks — losing exactly the
+	// cleanup those hooks exist to perform.
+	//
+	// The budget is the operator's to reconcile. Either raise the grace
+	// period above the sum, or lower the sum beneath it. For the defaults
+	// on Kubernetes, one of:
+	//
+	//	terminationGracePeriodSeconds: 45   // in the pod spec, or
+	//	ShutdownTimeout: 10 * time.Second   // 5 + 10 + 10 = 25s
+	//
+	// The framework does not clamp these values: it cannot see the grace
+	// period, and silently shortening a drain the operator asked for would
+	// cut off in-flight requests.
+	PreStopDelay time.Duration
+
+	// Server timeouts. Each defaults to a value sized for JSON APIs; set a
+	// negative value to disable one entirely (http.Server treats zero as
+	// "no timeout", which is why zero here means "use the default" rather
+	// than "off").
+	//
+	// Defaults: ReadTimeout 30s, ReadHeaderTimeout 10s, WriteTimeout 30s,
+	// IdleTimeout 120s.
+	//
+	// WriteTimeout is the one to reach for. It bounds the whole response,
+	// so the 30s default rules out server-sent events, long-polling,
+	// streaming responses and slow downloads — the middleware already
+	// preserves http.Flusher and http.Hijacker for exactly those, so this
+	// timeout is the only thing in the way:
+	//
+	//	runko.New(runko.Options{WriteTimeout: -1}) // SSE, streaming
+	//
+	// Disabling it means a stalled client can hold a connection until
+	// IdleTimeout or the OS gives up, so prefer a generous value over -1
+	// unless the response really is unbounded.
+	//
+	// ReadTimeout bounds the whole request including the body, so raise it
+	// for large uploads rather than relying on the body limit alone.
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+
+	// Handler replaces the built-in Router as the server's handler.
+	//
+	// Set this to use RunkoGO's lifecycle, health checks, security
+	// middleware and service client with a different router — chi, or a
+	// plain http.ServeMux — instead of adopting the whole framework:
+	//
+	//	r := chi.NewRouter()
+	//	app := runko.New(runko.Options{Handler: r})
+	//	r.Method("GET", "/healthz", app.LivenessHandler())
+	//	r.Method("GET", "/readyz", app.ReadinessHandler())
+	//
+	// When set, App.Router is not served and the health endpoints are NOT
+	// registered automatically — mount them yourself via LivenessHandler
+	// and ReadinessHandler, wherever your router wants them. Run logs an
+	// error if it detects routes or middleware registered on the unused
+	// built-in Router, since that is silent dead configuration.
+	Handler http.Handler
 }
 
 // New creates a new App with the given options. This is the single entry
@@ -127,6 +250,19 @@ func New(opts Options) *App {
 	if opts.MaxHeaderBytes == 0 {
 		opts.MaxHeaderBytes = defaultMaxHeaderBytes
 	}
+	if opts.PreStopDelay == 0 {
+		opts.PreStopDelay = defaultPreStopDelay
+	}
+	if opts.PreStopDelay < 0 {
+		opts.PreStopDelay = 0
+	}
+
+	// Zero means "use the default"; negative means "no timeout", which is
+	// what http.Server spells as zero.
+	opts.ReadTimeout = resolveTimeout(opts.ReadTimeout, defaultReadTimeout)
+	opts.ReadHeaderTimeout = resolveTimeout(opts.ReadHeaderTimeout, defaultReadHeaderTimeout)
+	opts.WriteTimeout = resolveTimeout(opts.WriteTimeout, defaultWriteTimeout)
+	opts.IdleTimeout = resolveTimeout(opts.IdleTimeout, defaultIdleTimeout)
 
 	if (opts.TLSCert == "") != (opts.TLSKey == "") {
 		certStatus, keyStatus := "<set>", "<set>"
@@ -144,15 +280,21 @@ func New(opts Options) *App {
 	logger := newLogger(opts.ServiceName, opts.LogLevel)
 
 	app := &App{
-		Config:          newConfigLoader(),
-		Logger:          logger,
-		Proxy:           newProxyResolver(opts.TrustedProxies),
-		serviceName:     opts.ServiceName,
-		shutdownTimeout: opts.ShutdownTimeout,
-		tlsCert:         opts.TLSCert,
-		tlsKey:          opts.TLSKey,
-		tlsMinVersion:   opts.TLSMinVersion,
-		maxHeaderBytes:  opts.MaxHeaderBytes,
+		Config:            newConfigLoader(),
+		Logger:            logger,
+		Proxy:             newProxyResolver(opts.TrustedProxies),
+		serviceName:       opts.ServiceName,
+		shutdownTimeout:   opts.ShutdownTimeout,
+		preStopDelay:      opts.PreStopDelay,
+		readTimeout:       opts.ReadTimeout,
+		readHeaderTimeout: opts.ReadHeaderTimeout,
+		writeTimeout:      opts.WriteTimeout,
+		idleTimeout:       opts.IdleTimeout,
+		handler:           opts.Handler,
+		tlsCert:           opts.TLSCert,
+		tlsKey:            opts.TLSKey,
+		tlsMinVersion:     opts.TLSMinVersion,
+		maxHeaderBytes:    opts.MaxHeaderBytes,
 		health: &healthState{
 			ready:  false,
 			checks: make([]healthCheck, 0),
@@ -204,19 +346,61 @@ func (a *App) AddHealthCheck(name string, timeout time.Duration, check func(ctx 
 	})
 }
 
-// Run starts the HTTP server and blocks until SIGINT or SIGTERM, then
-// gracefully drains in-flight requests and runs shutdown hooks.
+// Run starts the HTTP server and blocks until SIGINT or SIGTERM.
+//
+// Shutdown proceeds in a fixed order: readiness flips to false, the server
+// keeps serving for PreStopDelay with the listener still open, in-flight
+// requests drain, then shutdown hooks run with a fresh timeout.
+//
+// Shutdown hooks also run when Run returns early — a failed listen, an
+// unexpected server error, or a startup hook that fails after an earlier
+// one succeeded. They run exactly once. They are skipped only when the
+// first startup hook fails, since nothing was acquired at that point.
+//
+// CONV-13: the three shutdown phases are sequential, so the worst-case
+// duration is their sum. See Options.PreStopDelay for the budget and how
+// it interacts with terminationGracePeriodSeconds.
 func (a *App) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	a.stop = stop
 
+	// Shutdown hooks release what startup hooks acquired, so they must run
+	// on every exit past that point — including a failed listen or an
+	// unexpected server error — or those resources leak. Guarded by Once
+	// because the normal shutdown path and the defer both reach it.
+	var shutdownOnce sync.Once
+	runShutdownHooks := func() {
+		shutdownOnce.Do(func() {
+			// Hooks get a fresh full timeout so they aren't starved when
+			// HTTP drain consumes most of the shutdown budget.
+			hookCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+			defer cancel()
+			for _, fn := range a.onShutdown {
+				if err := fn(hookCtx); err != nil {
+					a.Logger.Error("shutdown hook error", "error", err)
+				}
+			}
+		})
+	}
+
+	completedStartupHooks := 0
 	for _, fn := range a.onStartup {
 		if err := fn(ctx); err != nil {
 			a.Logger.Error("startup hook failed", "error", err)
+			// Roll back the hooks that already succeeded. When none did,
+			// there is nothing to release and shutdown hooks may legitimately
+			// assume startup ran, so they are skipped.
+			if completedStartupHooks > 0 {
+				runShutdownHooks()
+			}
 			return fmt.Errorf("startup failed: %w", err)
 		}
+		completedStartupHooks++
 	}
+
+	// All startup hooks succeeded; every exit from here runs shutdown hooks.
+	defer runShutdownHooks()
 
 	host := a.Config.GetDefault("HOST", "0.0.0.0")
 	port := a.Config.GetDefault("PORT", "19100")
@@ -231,8 +415,21 @@ func (a *App) Run() error {
 	// Register health endpoints now, after all Use() calls have been made,
 	// so they inherit global middleware (logging, request ID, client IP)
 	// while staying outside any auth-protected groups.
-	a.Router.Handle("GET /healthz", a.livenessHandler())
-	a.Router.Handle("GET /readyz", a.readinessHandler())
+	// With a custom Handler the framework does not know where the health
+	// endpoints belong, so the caller mounts them via LivenessHandler and
+	// ReadinessHandler.
+	handler := a.handler
+	if handler == nil {
+		a.Router.Handle("GET /healthz", a.LivenessHandler())
+		a.Router.Handle("GET /readyz", a.ReadinessHandler())
+		handler = a.Router
+	} else if a.Router.registrations() > 0 {
+		// Configuring the built-in Router while serving a different
+		// handler is dead configuration that would otherwise fail silently
+		// — no routes, no middleware, no explanation.
+		a.Logger.Error("Options.Handler is set, so the built-in Router is not served — " +
+			"routes and middleware registered on app.Router will never run")
+	}
 
 	// Bind before starting the server goroutine so we can return the
 	// bind error directly and avoid racing the readiness flag.
@@ -244,11 +441,11 @@ func (a *App) Run() error {
 	useTLS := a.tlsCert != "" && a.tlsKey != ""
 
 	a.server = &http.Server{
-		Handler:           a.Router,
-		ReadTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Handler:           handler,
+		ReadTimeout:       a.readTimeout,
+		ReadHeaderTimeout: a.readHeaderTimeout,
+		WriteTimeout:      a.writeTimeout,
+		IdleTimeout:       a.idleTimeout,
 		MaxHeaderBytes:    a.maxHeaderBytes,
 	}
 	if useTLS {
@@ -300,6 +497,16 @@ func (a *App) Run() error {
 	a.health.ready = false
 	a.health.mu.Unlock()
 
+	// Keep serving while the load balancer notices we are unready. The
+	// listener stays open throughout, so requests still in flight or
+	// already routed here complete normally instead of being refused.
+	if a.preStopDelay > 0 {
+		a.Logger.Info("draining before shutdown",
+			"pre_stop_delay", a.preStopDelay.String(),
+		)
+		time.Sleep(a.preStopDelay)
+	}
+
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer drainCancel()
 
@@ -307,16 +514,7 @@ func (a *App) Run() error {
 		a.Logger.Error("server shutdown error", "error", err)
 	}
 
-	// Shutdown hooks get a fresh full timeout so they aren't starved when
-	// HTTP drain consumes most of phase 1.
-	hookCtx, hookCancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
-	defer hookCancel()
-
-	for _, fn := range a.onShutdown {
-		if err := fn(hookCtx); err != nil {
-			a.Logger.Error("shutdown hook error", "error", err)
-		}
-	}
+	runShutdownHooks()
 
 	a.Logger.Info("service stopped")
 	return nil
@@ -335,18 +533,26 @@ func (a *App) runHealthCheck(parent context.Context, hc healthCheck) (err error)
 	return hc.check(ctx)
 }
 
-// livenessHandler returns 200 if the process is alive. Kubernetes uses this
-// to decide whether to restart the container.
-func (a *App) livenessHandler() http.Handler {
+// LivenessHandler returns 200 while the process is alive. Kubernetes uses
+// this to decide whether to restart the container.
+//
+// Exported so it can be mounted on a router of your own when Options.Handler
+// is set. With the built-in Router it is registered automatically at
+// GET /healthz.
+func (a *App) LivenessHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		JSON(w, http.StatusOK, Map{"status": "alive"})
 	})
 }
 
-// readinessHandler returns 200 if the service is ready to handle traffic,
+// ReadinessHandler returns 200 if the service is ready to handle traffic,
 // 503 otherwise. Failure responses list only the names of failing checks;
 // set HEALTH_DETAIL=true to include error messages for debugging.
-func (a *App) readinessHandler() http.Handler {
+//
+// Exported so it can be mounted on a router of your own when Options.Handler
+// is set. With the built-in Router it is registered automatically at
+// GET /readyz.
+func (a *App) ReadinessHandler() http.Handler {
 	showDetail := a.Config.GetBool("HEALTH_DETAIL")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

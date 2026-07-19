@@ -36,7 +36,16 @@ type ServiceClientConfig struct {
 	// Timeout is the per-request timeout. Defaults to 10 seconds.
 	Timeout time.Duration
 
-	// MaxRetries is how many times to retry on failure. Defaults to 2.
+	// MaxRetries is how many times to retry after the first attempt.
+	// Defaults to 2; set a negative value for no retries at all.
+	//
+	// Zero means "use the default" rather than "no retries", matching
+	// Options elsewhere in the package. Without the negative escape hatch
+	// there would be no way to express "attempt once", which is what you
+	// want in front of an endpoint that is not safe to replay.
+	//
+	// It is a ceiling, not a guarantee: the circuit breaker is re-checked
+	// before each retry and can end the loop early (CONV-10).
 	MaxRetries int
 
 	// RetryDelay is the base delay between retries (doubles each retry).
@@ -72,6 +81,8 @@ func NewServiceClient(cfg ServiceClientConfig) *ServiceClient {
 	}
 	if cfg.MaxRetries == 0 {
 		cfg.MaxRetries = 2
+	} else if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 0
 	}
 	if cfg.RetryDelay == 0 {
 		cfg.RetryDelay = 500 * time.Millisecond
@@ -149,11 +160,37 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 		return nil, fmt.Errorf("circuit breaker open for %s", sc.baseURL)
 	}
 
+	// allow() granted this call a slot — in the half-open state, the single
+	// probe slot. Every exit path must settle that slot by recording an
+	// outcome, or release it here. Without this, one cancelled context
+	// during a retry backoff would leave the breaker half-open forever and
+	// refuse every subsequent call for the life of the process.
+	settled := false
+	defer func() {
+		if !settled {
+			sc.circuit.recordAbort()
+		}
+	}()
+
 	url := sc.baseURL + path
 
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt <= sc.maxRetries; attempt++ {
 		if attempt > 0 {
+			// Re-check the breaker before each retry. This call's own
+			// failures may have opened it, and continuing to retry against
+			// a service the breaker has decided to shed defeats the point
+			// of having one.
+			if !sc.circuit.allow() {
+				break
+			}
+			// This allow() granted a fresh slot, which may again be the
+			// half-open probe. The previous attempt's outcome does not
+			// settle it, so clear the flag or an exit during the backoff
+			// below would leak the new slot and wedge the breaker.
+			settled = false
+
 			// Exponential backoff with jitter to avoid thundering herd.
 			base := sc.retryDelay * time.Duration(1<<(attempt-1))
 			delay := base/2 + time.Duration(rand.Int64N(int64(base/2+1)))
@@ -184,15 +221,39 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 		if tid := TraceID(ctx); tid != "" {
 			req.Header.Set("X-Trace-ID", tid)
 		}
+		// Forward the W3C traceparent byte-for-byte. RunkoGO does not
+		// create spans, so it must not synthesize or mutate this value —
+		// passing it through unchanged is what keeps a trace intact across
+		// a hop it does not itself instrument. See CONV-12.
+		if tp := Traceparent(ctx); tp != "" {
+			req.Header.Set("traceparent", tp)
+			// §3.5 requires a receiver to pass tracestate on, and §3.4
+			// forbids modifying it when traceparent itself is unchanged.
+			// Dropping it would discard another vendor's trace data.
+			if ts := Tracestate(ctx); ts != "" {
+				req.Header.Set("tracestate", ts)
+			}
+		}
 
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
+		attempts++
+
 		resp, err := sc.client.Do(req)
 		if err != nil {
 			lastErr = err
 			sc.circuit.recordFailure()
+			settled = true
+			// A transport error is not proof the server did not process
+			// the request — a connection reset while awaiting the response
+			// may follow a fully applied write. Retrying here would
+			// duplicate charges and orders, so the same idempotency rule
+			// that guards the 5xx branch applies.
+			if !isIdempotent(method) && !sc.retryNonIdempotent {
+				break
+			}
 			continue
 		}
 
@@ -201,6 +262,7 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 			resp.Body.Close()
 			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
 			sc.circuit.recordFailure()
+			settled = true
 			if !isIdempotent(method) && !sc.retryNonIdempotent {
 				break
 			}
@@ -208,12 +270,17 @@ func (sc *ServiceClient) do(ctx context.Context, method, path string, body any) 
 		}
 
 		sc.circuit.recordSuccess()
+		settled = true
 		resp.Body = newLimitedReadCloser(resp.Body, sc.maxResponseSize)
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("all %d attempts failed for %s %s: %w",
-		sc.maxRetries+1, method, url, lastErr)
+	// Report attempts actually made, not the configured ceiling. The
+	// breaker or the idempotency guard can end the loop early, and a
+	// message claiming three attempts when one was made sends whoever is
+	// debugging it looking in the wrong place.
+	return nil, fmt.Errorf("%s %s failed after %d attempt(s): %w",
+		method, url, attempts, lastErr)
 }
 
 // circuitBreaker trips after a configurable number of consecutive failures.
@@ -262,11 +329,38 @@ func (cb *circuitBreaker) allow() bool {
 	return true
 }
 
+// currentState reports the breaker's state. Used by tests to distinguish a
+// released probe slot from a wedged one, which status codes cannot show.
+func (cb *circuitBreaker) currentState() string {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state
+}
+
 func (cb *circuitBreaker) recordSuccess() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.failures = 0
 	cb.state = "closed"
+}
+
+// recordAbort releases a slot granted by allow() when the call ended for a
+// reason that says nothing about upstream health — a cancelled context, a
+// body that would not marshal, an unbuildable request. It must not count as
+// a failure, but it must not leave the half-open probe slot consumed
+// either: nothing else can move the breaker out of half-open, so a leaked
+// slot wedges it permanently.
+func (cb *circuitBreaker) recordAbort() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == "half-open" {
+		// Back to open, and restart the cooldown. Without refreshing
+		// lastFailure the next allow() would grant a probe immediately,
+		// so a caller cancelling in a loop could issue unlimited probes
+		// against a service the breaker is supposed to be shielding.
+		cb.state = "open"
+		cb.lastFailure = cb.now()
+	}
 }
 
 func (cb *circuitBreaker) recordFailure() {
@@ -280,6 +374,10 @@ func (cb *circuitBreaker) recordFailure() {
 }
 
 // isIdempotent returns true if the HTTP method is idempotent per RFC 9110.
+//
+// CONV-10: retries are safe by default. Non-idempotent methods are not
+// replayed on 5xx responses or on transport errors unless the caller opts
+// in via RetryNonIdempotent.
 func isIdempotent(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPut,

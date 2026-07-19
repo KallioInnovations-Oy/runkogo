@@ -22,8 +22,17 @@ import (
 
 // UserStore defines all operations on users.
 type UserStore interface {
-	// List returns all users, ordered by creation time descending.
-	List(ctx context.Context) ([]User, error)
+	// ListPage returns one page of users ordered by creation time
+	// descending, plus the total number of users available.
+	//
+	// Pagination lives in the interface rather than in the handler on
+	// purpose. A List() that returns everything reads fine against a demo
+	// dataset and becomes an unbounded table scan in production — and a
+	// store that silently caps the result instead would report a total
+	// that contradicts the rows it returned.
+	//
+	// limit and offset are assumed non-negative; callers clamp them.
+	ListPage(ctx context.Context, limit, offset int) (users []User, total int, err error)
 
 	// GetByID returns a single user. Returns ErrNotFound if not found.
 	GetByID(ctx context.Context, id string) (User, error)

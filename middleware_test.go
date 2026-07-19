@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,11 +26,11 @@ func TestSecurityHeaders_Defaults(t *testing.T) {
 
 	expected := map[string]string{
 		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":       "DENY",
-		"X-Xss-Protection":      "0",
-		"Referrer-Policy":       "strict-origin-when-cross-origin",
-		"Cache-Control":         "no-store",
-		"Permissions-Policy":    "camera=(), microphone=(), geolocation=()",
+		"X-Frame-Options":        "DENY",
+		"X-Xss-Protection":       "0",
+		"Referrer-Policy":        "strict-origin-when-cross-origin",
+		"Cache-Control":          "no-store",
+		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
 	}
 
 	for header, want := range expected {
@@ -179,31 +180,90 @@ func TestRateLimit_Basic(t *testing.T) {
 	}
 }
 
-func TestRateLimit_MaxClients(t *testing.T) {
-	handler := RateLimit(RateLimitConfig{
-		RequestsPerWindow: 100,
-		Window:            1 * time.Minute,
-		MaxClients:        2,
-	})(nopHandler)
-
-	// Fill up 2 client slots.
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = strings.Replace("X.0.0.1:1234", "X", string(rune('1'+i)), 1)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Errorf("client %d: status = %d, want 200", i+1, rec.Code)
-		}
-	}
-
-	// 3rd unique client should be rejected (map full).
+// rateLimitReq fires one request from the given RemoteAddr and returns the
+// status code.
+func rateLimitReq(handler http.Handler, remoteAddr string) int {
 	req := httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "9.9.9.9:1234"
+	req.RemoteAddr = remoteAddr
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Errorf("overflow client: status = %d, want 429", rec.Code)
+	return rec.Code
+}
+
+// CONV-06: the client table is bounded by evicting the least recently seen
+// bucket, never by rejecting unseen clients. Rejecting at capacity would
+// let an attacker rotating addresses fill the table and deny service to
+// every new legitimate client.
+func TestRateLimit_AtCapacityEvictsLRUAndAdmitsNewClients(t *testing.T) {
+	// MaxClients is 3 rather than 2 so the assertions below have a spare
+	// slot to probe with: at exactly capacity, every probe for an evicted
+	// client would itself evict another and mask what is being measured.
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 1,
+		Window:            1 * time.Minute,
+		MaxClients:        3,
+	})(nopHandler)
+
+	const (
+		a = "1.0.0.1:1234"
+		b = "2.0.0.1:1234"
+		c = "3.0.0.1:1234"
+		d = "9.9.9.9:1234"
+	)
+
+	// A consumes its allowance and becomes least recently seen; B and C
+	// fill the remaining slots. Table: {A,B,C}, LRU order C,B,A.
+	if got := rateLimitReq(handler, a); got != http.StatusOK {
+		t.Fatalf("A first request: status = %d, want 200", got)
+	}
+	if got := rateLimitReq(handler, a); got != http.StatusTooManyRequests {
+		t.Fatalf("A over limit: status = %d, want 429", got)
+	}
+	if got := rateLimitReq(handler, b); got != http.StatusOK {
+		t.Fatalf("B first request: status = %d, want 200", got)
+	}
+	if got := rateLimitReq(handler, c); got != http.StatusOK {
+		t.Fatalf("C first request: status = %d, want 200", got)
+	}
+
+	// The table is full. A brand-new client must still be admitted — a
+	// rejection here is the lockout regression. This evicts A.
+	if got := rateLimitReq(handler, d); got != http.StatusOK {
+		t.Errorf("new client at capacity: status = %d, want 200 (lockout regression)", got)
+	}
+
+	// B was not evicted, so its exhausted window still applies. This is
+	// what distinguishes LRU eviction from clearing the whole table.
+	if got := rateLimitReq(handler, b); got != http.StatusTooManyRequests {
+		t.Errorf("retained client: status = %d, want 429 (table was flushed, not LRU-evicted)", got)
+	}
+
+	// A was evicted, so it starts a fresh window. Were it still tracked,
+	// this second request would be refused like B's.
+	if got := rateLimitReq(handler, a); got != http.StatusOK {
+		t.Errorf("evicted client: status = %d, want 200", got)
+	}
+}
+
+// CONV-06: IPv6 clients are bucketed by /64. Keying on the full address
+// would make the limiter a no-op, since a single client is routinely
+// delegated 2^64 addresses to rotate through.
+func TestRateLimit_IPv6BucketedBySlash64(t *testing.T) {
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 1,
+		Window:            1 * time.Minute,
+	})(nopHandler)
+
+	if got := rateLimitReq(handler, "[2001:db8::1]:1234"); got != http.StatusOK {
+		t.Fatalf("first address in /64: status = %d, want 200", got)
+	}
+	// Different address, same /64 — must share the bucket.
+	if got := rateLimitReq(handler, "[2001:db8::2]:1234"); got != http.StatusTooManyRequests {
+		t.Errorf("second address in same /64: status = %d, want 429", got)
+	}
+	// Different /64 — must get its own bucket.
+	if got := rateLimitReq(handler, "[2001:db9::1]:1234"); got != http.StatusOK {
+		t.Errorf("address in different /64: status = %d, want 200", got)
 	}
 }
 
@@ -492,45 +552,79 @@ func TestStatusWriter_NoDuplicateWriteHeader(t *testing.T) {
 	}
 }
 
-// FIX-08: Rate limiter should clean up expired entries inline.
+// FIX-08: Rate limiter cleans up expired entries inline, reclaiming
+// capacity so live clients do not have to be evicted to make room.
+//
+// This asserts the table size directly. Response codes cannot distinguish
+// a swept entry from one lazily reset on next contact, so a black-box test
+// here passes with the sweep entirely removed.
 func TestRateLimit_CleansUpExpiredEntries(t *testing.T) {
-	handler := RateLimit(RateLimitConfig{
+	now := time.Now()
+	rl := newRateLimiter(RateLimitConfig{
+		RequestsPerWindow: 1,
+		Window:            time.Minute,
+		MaxClients:        100,
+		Clock:             func() time.Time { return now },
+	})
+
+	for _, key := range []string{"1.0.0.1", "2.0.0.1", "3.0.0.1"} {
+		rl.allow(key)
+	}
+	if got := rl.tracked(); got != 3 {
+		t.Fatalf("tracked = %d, want 3", got)
+	}
+
+	// Advance past the window so every entry is stale, then touch the
+	// limiter once to trigger the inline sweep.
+	now = now.Add(2 * time.Minute)
+	rl.allow("9.9.9.9")
+
+	// The three stale entries are gone; only the fresh one remains.
+	if got := rl.tracked(); got != 1 {
+		t.Errorf("tracked after sweep = %d, want 1 — expired entries were not reclaimed", got)
+	}
+}
+
+// CONV-06: the tracking table never exceeds MaxClients, however many
+// distinct clients are seen. This is the memory bound the convention
+// promises, and it is not observable from status codes.
+func TestRateLimit_TableStaysBounded(t *testing.T) {
+	rl := newRateLimiter(RateLimitConfig{
 		RequestsPerWindow: 100,
-		Window:            50 * time.Millisecond,
-		MaxClients:        2,
+		Window:            time.Minute,
+		MaxClients:        50,
+	})
+
+	for i := 0; i < 5000; i++ {
+		rl.allow(fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+	}
+
+	if got := rl.tracked(); got != 50 {
+		t.Errorf("tracked = %d, want 50 (MaxClients bound not enforced)", got)
+	}
+}
+
+// The limiter is reached concurrently by every request. Exercised here so
+// `go test -race` has something to catch, since the LRU list and the map
+// are mutated together on the hot path.
+func TestRateLimit_ConcurrentAccess(t *testing.T) {
+	handler := RateLimit(RateLimitConfig{
+		RequestsPerWindow: 5,
+		Window:            time.Minute,
+		MaxClients:        16,
 	})(nopHandler)
 
-	// Fill up 2 client slots.
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = strings.Replace("X.0.0.1:1234", "X", string(rune('1'+i)), 1)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("client %d: status = %d, want 200", i+1, rec.Code)
-		}
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				rateLimitReq(handler, fmt.Sprintf("10.0.0.%d:1234", (i*20+j)%64))
+			}
+		}(i)
 	}
-
-	// 3rd client should be rejected (map full).
-	req := httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "9.9.9.9:1234"
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("overflow before cleanup: status = %d, want 429", rec.Code)
-	}
-
-	// Wait for the window to expire.
-	time.Sleep(60 * time.Millisecond)
-
-	// Now the inline cleanup should free slots, allowing the 3rd client.
-	req = httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "9.9.9.9:1234"
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("after cleanup: status = %d, want 200", rec.Code)
-	}
+	wg.Wait()
 }
 
 // FIX-10: CORS preflight should reject disallowed methods.
@@ -793,5 +887,103 @@ func TestSecurityHeaders_NoCSPByDefault(t *testing.T) {
 
 	if got := rec.Header().Get("Content-Security-Policy"); got != "" {
 		t.Errorf("CSP should not be set by default, got %q", got)
+	}
+}
+
+// CONV-08: the access log carries the matched route template alongside the
+// concrete path. Without it, /users/1 and /users/2 are distinct log keys
+// and latency cannot be aggregated by endpoint.
+func TestLogger_IncludesRoutePattern(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	rt := newRouter(nil)
+	rt.Use(Logger(logger))
+	rt.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {})
+
+	rt.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/42", nil))
+
+	out := buf.String()
+	if !strings.Contains(out, `"pattern":"GET /users/{id}"`) {
+		t.Errorf("log line missing the route pattern: %s", out)
+	}
+	// The concrete path is still recorded — the pattern supplements it.
+	if !strings.Contains(out, `"path":"/users/42"`) {
+		t.Errorf("log line missing the concrete path: %s", out)
+	}
+}
+
+// The pattern survives the documented chain ordering, in which the
+// request-cloning middleware runs BEFORE Logger. This is the ordering the
+// example and scaffold use.
+func TestLogger_PatternSurvivesDocumentedChainOrder(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	rt := newRouter(nil)
+	rt.Use(
+		RequestIDMiddleware(),                     // clones via WithContext
+		ClientIPMiddleware(newProxyResolver(nil)), // clones via WithContext
+		Logger(logger),
+	)
+	rt.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {})
+
+	rt.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/42", nil))
+
+	if !strings.Contains(buf.String(), `"pattern":"GET /users/{id}"`) {
+		t.Errorf("pattern lost in the documented chain order: %s", buf.String())
+	}
+	// Request correlation must survive too — the same clone carries it.
+	if strings.Contains(buf.String(), `"request_id":""`) {
+		t.Errorf("request_id empty despite RequestIDMiddleware running first: %s", buf.String())
+	}
+}
+
+// Registering Logger BEFORE a cloning middleware silently loses the
+// pattern: the mux stamps the clone, which Logger does not hold. This is a
+// documented ordering hazard, pinned here so the behavior is known rather
+// than discovered.
+func TestLogger_PatternLostWhenLoggerPrecedesCloningMiddleware(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	rt := newRouter(nil)
+	rt.Use(
+		Logger(logger),
+		RequestIDMiddleware(), // clones after Logger captured its pointer
+	)
+	rt.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {})
+
+	rt.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/42", nil))
+
+	if strings.Contains(buf.String(), `"pattern"`) {
+		t.Errorf("pattern unexpectedly present — the ordering hazard may have been fixed, "+
+			"in which case update the docs in middleware.go and README: %s", buf.String())
+	}
+	// The request is still logged; only the pattern attribute is missing.
+	if !strings.Contains(buf.String(), `"status":200`) {
+		t.Errorf("request was not logged at all: %s", buf.String())
+	}
+}
+
+// Unmatched requests have no route template, so the attribute is omitted
+// rather than logged empty.
+func TestLogger_OmitsPatternWhenUnmatched(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	rt := newRouter(nil)
+	rt.Use(Logger(logger))
+	rt.HandleFunc("GET /users", func(w http.ResponseWriter, r *http.Request) {})
+
+	rt.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/nope", nil))
+
+	out := buf.String()
+	if strings.Contains(out, `"pattern"`) {
+		t.Errorf("unmatched request logged a pattern: %s", out)
+	}
+	// But it is still logged — that is the audit-trail guarantee.
+	if !strings.Contains(out, `"status":404`) {
+		t.Errorf("unmatched request was not logged: %s", out)
 	}
 }

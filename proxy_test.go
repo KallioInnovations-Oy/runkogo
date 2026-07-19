@@ -172,7 +172,7 @@ func TestProxyResolver_IsTrusted(t *testing.T) {
 }
 
 // AUDIT3-06: Proxy resolver should skip invalid IPs in X-Forwarded-For.
-func TestProxyResolver_InvalidIPInXFF_Skipped(t *testing.T) {
+func TestProxyResolver_InvalidIPInXFF_TerminatesWalk(t *testing.T) {
 	pr := newProxyResolver([]string{"10.0.0.0/8"})
 
 	tests := []struct {
@@ -182,13 +182,25 @@ func TestProxyResolver_InvalidIPInXFF_Skipped(t *testing.T) {
 		want       string
 	}{
 		{
-			"garbage in XFF is skipped, falls back to directIP",
+			"garbage in XFF terminates the walk, falls back to directIP",
 			"10.0.0.1:8080", "not-an-ip, 10.0.0.2",
 			"10.0.0.1",
 		},
 		{
-			"valid IP after garbage",
+			// An unparseable entry means the chain is no longer verifiable
+			// leftward. The 203.0.113.50 entry sits behind the garbage and
+			// is therefore entirely attacker-chosen: honouring it would let
+			// a client name its own IP. Terminate and fall back to
+			// RemoteAddr instead.
+			"valid IP behind garbage is not trusted",
 			"10.0.0.1:8080", "203.0.113.50, not-an-ip, 10.0.0.2",
+			"10.0.0.1",
+		},
+		{
+			// The "ip:port" form is emitted by some proxies and is a
+			// legitimate chain, not corruption — normalize, don't terminate.
+			"ip:port entries are normalized",
+			"10.0.0.1:8080", "203.0.113.50, 10.0.0.2:44321",
 			"203.0.113.50",
 		},
 		{

@@ -1,376 +1,347 @@
-// This example application demonstrates every feature of the RunkoGO framework.
-// It implements a simple user management API that's ready for production
-// deployment in a microservice cluster.
+// RunkoGO example — service-to-service calls in a cluster.
+//
+// The scaffold (../scaffold) shows a complete single service: routing,
+// storage, auth, CSRF, the error taxonomy, the demo UI. This example does
+// not repeat any of that. It exists for the one thing the scaffold does
+// not cover: what happens when your service has to call another one.
 //
 // Run it:
 //
-//	PORT=19100 LOG_LEVEL=debug go run .
+//	go run .
+//	open http://localhost:19100/demo
 //
-// Test it:
+// It starts two HTTP servers in one process:
 //
-//	curl http://localhost:19100/healthz
-//	curl http://localhost:19100/readyz
-//	curl http://localhost:19100/api/v1/users
-//	curl http://localhost:19100/api/v1/users/42
-//	curl -X POST http://localhost:19100/api/v1/users \
-//	  -H "Content-Type: application/json" \
-//	  -d '{"name":"Ville","email":"ville@example.com"}'
+//	:19100  orders  — a RunkoGO app, the service you are writing
+//	:19101  users   — a deliberately unreliable peer, a plain net/http
+//	                  server, standing in for a service you do not control
 //
-// Graceful shutdown:
-//
-//	# In another terminal, send SIGTERM:
-//	kill -TERM $(pgrep -f "go run .")
-//	# Watch the logs — the server drains connections and shuts down cleanly.
+// "orders" calls "users" through runko.ServiceClient, so you can watch the
+// retry, circuit-breaker and trace-propagation behaviour against a peer
+// that fails on demand. Everything is observable from the endpoints under
+// /demo — no external service and no test harness required.
 package main
 
 import (
 	"context"
-	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
+	"os"
+	"sync/atomic"
 	"time"
 
 	runko "github.com/kallioinnovations/runkogo"
 )
 
 // ==========================================================================
-// Domain types
+// The peer service — plain net/http, standing in for something you call
 // ==========================================================================
 
-// User represents a user in our system.
-type User struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	CreatedAt time.Time `json:"created_at"`
+// upstream simulates a service you depend on but do not control. It is
+// plain net/http on purpose: RunkoGO's client talks to anything that
+// speaks HTTP, and the peer in a real cluster is often not Go at all.
+type upstream struct {
+	// failuresRemaining makes /flaky fail a set number of times before it
+	// recovers, which is how the retry path becomes observable.
+	failuresRemaining atomic.Int32
+
+	// calls counts every request that actually arrived, so the demo can
+	// show the difference between calls the client made and calls that
+	// reached the peer.
+	calls atomic.Int64
 }
 
-// CreateUserRequest is the payload for creating a new user.
-type CreateUserRequest struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
-}
+func (u *upstream) routes() *http.ServeMux {
+	mux := http.NewServeMux()
 
-// ==========================================================================
-// In-memory store (replace with a real database in production)
-// ==========================================================================
-
-type UserStore struct {
-	mu    sync.RWMutex
-	users map[string]User
-	seq   int
-}
-
-func NewUserStore() *UserStore {
-	return &UserStore{
-		users: map[string]User{
-			"1": {ID: "1", Name: "Demo User", Email: "demo@example.com", CreatedAt: time.Now()},
-		},
-		seq: 1,
-	}
-}
-
-func (s *UserStore) List() []User {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	users := make([]User, 0, len(s.users))
-	for _, u := range s.users {
-		users = append(users, u)
-	}
-	return users
-}
-
-func (s *UserStore) Get(id string) (User, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	u, ok := s.users[id]
-	return u, ok
-}
-
-func (s *UserStore) Create(name, email string) User {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq++
-	id := fmt.Sprintf("%d", s.seq)
-	u := User{
-		ID:        id,
-		Name:      name,
-		Email:     email,
-		CreatedAt: time.Now(),
-	}
-	s.users[id] = u
-	return u
-}
-
-func (s *UserStore) Delete(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.users[id]; !ok {
-		return false
-	}
-	delete(s.users, id)
-	return true
-}
-
-// ==========================================================================
-// Handlers
-// ==========================================================================
-
-// UserHandler groups all user-related HTTP handlers.
-// In a real app, this would hold a database connection instead of
-// the in-memory store.
-type UserHandler struct {
-	store  *UserStore
-	logger *slog.Logger
-}
-
-// List returns all users.
-// GET /api/v1/users
-func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
-	users := h.store.List()
-
-	// Demonstrate using the logger with request context.
-	// The request ID is automatically included.
-	log := runko.LogWithContext(h.logger, r.Context())
-	log.Debug("listing users", "count", len(users))
-
-	runko.Paginated(w, users, 1, 20, len(users))
-}
-
-// Get returns a single user by ID.
-// GET /api/v1/users/{id}
-func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
-	id := runko.PathParam(r, "id")
-
-	user, ok := h.store.Get(id)
-	if !ok {
-		runko.Error(w, http.StatusNotFound, "not_found", "User not found")
-		return
-	}
-
-	runko.JSON(w, http.StatusOK, user)
-}
-
-// Create adds a new user.
-// POST /api/v1/users
-func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
-	var req CreateUserRequest
-	if err := runko.Decode(w, r, &req); err != nil {
-		runko.Error(w, http.StatusBadRequest, "invalid_body", "Invalid JSON body")
-		return
-	}
-
-	// Validate.
-	if req.Name == "" || req.Email == "" {
-		runko.ErrorWithDetails(w, http.StatusUnprocessableEntity,
-			"validation_error", "Missing required fields",
-			runko.Map{"required": []string{"name", "email"}},
-		)
-		return
-	}
-
-	user := h.store.Create(req.Name, req.Email)
-
-	log := runko.LogWithContext(h.logger, r.Context())
-	log.Info("user created", "user_id", user.ID, "email", user.Email)
-
-	runko.Created(w, "/api/v1/users/"+user.ID, user)
-}
-
-// Delete removes a user.
-// DELETE /api/v1/users/{id}
-func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id := runko.PathParam(r, "id")
-
-	if !h.store.Delete(id) {
-		runko.Error(w, http.StatusNotFound, "not_found", "User not found")
-		return
-	}
-
-	log := runko.LogWithContext(h.logger, r.Context())
-	log.Info("user deleted", "user_id", id)
-
-	runko.NoContent(w)
-}
-
-// ==========================================================================
-// Custom middleware example
-// ==========================================================================
-
-// simpleAuth is a demo middleware that checks for an API key.
-// In production, replace this with JWT validation, OAuth2, etc.
-func simpleAuth(cfg *runko.ConfigLoader, logger *slog.Logger) runko.Middleware {
-	// Read the API key from environment at startup.
-	// Falls back to "demo-key" for development.
-	apiKey := cfg.GetDefault("API_KEY", "demo-key")
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := r.Header.Get("Authorization")
-
-			bearerMatch := subtle.ConstantTimeCompare([]byte(key), []byte("Bearer "+apiKey)) == 1
-			rawMatch := subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) == 1
-			if !bearerMatch && !rawMatch {
-				logger.Warn("unauthorized request",
-					"path", r.URL.Path,
-					"request_id", runko.RequestID(r.Context()),
-				)
-				runko.Error(w, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
-				return
-			}
-
-			// Add user identity to context (in a real app, extract from JWT).
-			ctx := runko.WithUserID(r.Context(), "api-user")
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-// ==========================================================================
-// Main
-// ==========================================================================
-
-func main() {
-	// ---------------------------------------------------------------
-	// Step 1: Create the app
-	// ---------------------------------------------------------------
-	// This sets up config loading, structured logging, routing, and
-	// health endpoints automatically.
-	app := runko.New(runko.Options{
-		ServiceName:     "user-service",
-		ShutdownTimeout: 10 * time.Second,
-		LogLevel:        "debug",
-	})
-
-	// ---------------------------------------------------------------
-	// Step 2: Initialize dependencies
-	// ---------------------------------------------------------------
-	store := NewUserStore()
-	handler := &UserHandler{
-		store:  store,
-		logger: app.Logger,
-	}
-
-	// ---------------------------------------------------------------
-	// Step 3: Register startup hooks
-	// ---------------------------------------------------------------
-	// These run before the server accepts requests.
-	app.OnStartup(func(ctx context.Context) error {
-		app.Logger.Info("connecting to database...")
-		// In a real app: db, err := sql.Open(...)
-		// Simulate slow startup.
-		time.Sleep(100 * time.Millisecond)
-		app.Logger.Info("database connected")
-		return nil
-	})
-
-	// ---------------------------------------------------------------
-	// Step 4: Register shutdown hooks
-	// ---------------------------------------------------------------
-	// These run after the server stops accepting requests.
-	app.OnShutdown(func(ctx context.Context) error {
-		app.Logger.Info("closing database connection...")
-		// In a real app: db.Close()
-		return nil
-	})
-
-	// ---------------------------------------------------------------
-	// Step 5: Register health checks
-	// ---------------------------------------------------------------
-	// The readiness endpoint (/readyz) runs these checks.
-	app.AddHealthCheck("database", 5*time.Second, func(ctx context.Context) error {
-		// In a real app: return db.PingContext(ctx)
-		return nil
-	})
-
-	// ---------------------------------------------------------------
-	// Step 6: Apply global middleware
-	// ---------------------------------------------------------------
-	// Order matters: first added runs first (outermost).
-	app.Router.Use(
-		// Catch panics so one bad request doesn't crash the server.
-		runko.Recovery(app.Logger),
-
-		// Limit all request bodies to 1MB.
-		runko.BodyLimit(1<<20),
-
-		// Set security headers on every response.
-		runko.DefaultSecurityHeaders(),
-
-		// Inject request ID (generate or forward from upstream).
-		runko.RequestIDMiddleware(),
-
-		// Resolve real client IP through trusted proxy chain.
-		runko.ClientIPMiddleware(app.Proxy),
-
-		// Log every request with method, path, status, duration.
-		runko.Logger(app.Logger),
-
-		// Handle CORS for browser-based API consumers.
-		runko.CORS(runko.CORSConfig{
-			AllowedOrigins: []string{"*"}, // Lock this down in production.
-		}),
-	)
-
-	// ---------------------------------------------------------------
-	// Step 7: Register routes
-	// ---------------------------------------------------------------
-	// Public routes (no auth required).
-	app.Router.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		runko.JSON(w, http.StatusOK, runko.Map{
-			"service": "user-service",
-			"version": "1.0.0",
+	// A healthy endpoint.
+	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		u.calls.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":    r.PathValue("id"),
+			"name":  "Ada Lovelace",
+			"email": "ada@example.com",
 		})
 	})
 
-	// API routes with auth and rate limiting.
-	api := app.Router.Group("/api/v1",
-		// Auth middleware — all routes in this group require a valid API key.
-		simpleAuth(app.Config, app.Logger),
+	// Fails until its budget is exhausted, then succeeds. Retries make the
+	// difference between a 503 and a 200 here.
+	mux.HandleFunc("GET /flaky", func(w http.ResponseWriter, r *http.Request) {
+		u.calls.Add(1)
+		if u.failuresRemaining.Add(-1) >= 0 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "temporarily unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"recovered": true})
+	})
 
-		// Rate limiting — 100 requests per minute per IP.
-		runko.RateLimit(runko.RateLimitConfig{
-			RequestsPerWindow: 100,
-			Window:            time.Minute,
-		}),
-	)
+	// Always fails. Used to trip the circuit breaker.
+	mux.HandleFunc("GET /down", func(w http.ResponseWriter, r *http.Request) {
+		u.calls.Add(1)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "permanently down"})
+	})
 
-	api.HandleFunc("GET /users", handler.List)
-	api.HandleFunc("GET /users/{id}", handler.Get)
-	api.HandleFunc("POST /users", handler.Create)
-	api.HandleFunc("DELETE /users/{id}", handler.Delete)
+	// Echoes the correlation headers it received, which is how trace
+	// propagation becomes visible.
+	mux.HandleFunc("GET /echo", func(w http.ResponseWriter, r *http.Request) {
+		u.calls.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"seen_by_peer": map[string]string{
+				"X-Request-ID": r.Header.Get("X-Request-ID"),
+				"X-Trace-ID":   r.Header.Get("X-Trace-ID"),
+				"traceparent":  r.Header.Get("traceparent"),
+				"tracestate":   r.Header.Get("tracestate"),
+			},
+		})
+	})
 
-	// ---------------------------------------------------------------
-	// Step 8: Demonstrate service-to-service client (optional)
-	// ---------------------------------------------------------------
-	// If this service needs to call another service:
-	_ = runko.NewServiceClient(runko.ServiceClientConfig{
-		BaseURL:          app.Config.GetDefault("ORDER_SERVICE_URL", "http://order-service:8081"),
-		Timeout:          5 * time.Second,
-		MaxRetries:       2,
-		CircuitThreshold: 5,
+	return mux
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// ==========================================================================
+// The service you are writing
+// ==========================================================================
+
+type handlers struct {
+	users    *runko.ServiceClient
+	upstream *upstream
+	peerURL  string
+	logger   *slog.Logger
+}
+
+// GetOrder is the ordinary case: fetch local data, enrich it from a peer.
+//
+// The client forwards this request's correlation IDs automatically, so the
+// peer's logs line up with ours without any plumbing in the handler.
+func (h *handlers) GetOrder(w http.ResponseWriter, r *http.Request) {
+	orderID := runko.PathParam(r, "id")
+
+	var customer map[string]any
+	if err := h.users.GetJSON(r.Context(), "/users/42", &customer); err != nil {
+		// The peer being unavailable is not the client's fault, and its
+		// error text is not the client's business — CONV-03, CONV-15.
+		runko.RespondError(w, r, h.logger,
+			runko.NewAppError(http.StatusBadGateway, "upstream_unavailable",
+				"Could not reach the users service").Wrap(err))
+		return
+	}
+
+	runko.JSON(w, http.StatusOK, runko.Map{
+		"order_id": orderID,
+		"total":    "42.00",
+		"customer": customer,
+	})
+}
+
+// DemoRetry shows MaxRetries turning a transient failure into a success.
+//
+// The peer is primed to fail twice, so a client with retries enabled
+// eventually gets a 200 while the peer records three separate calls.
+func (h *handlers) DemoRetry(w http.ResponseWriter, r *http.Request) {
+	h.upstream.failuresRemaining.Store(2)
+	before := h.upstream.calls.Load()
+
+	start := time.Now()
+	resp, err := h.users.Get(r.Context(), "/flaky")
+	elapsed := time.Since(start)
+
+	result := runko.Map{
+		"peer_calls":     h.upstream.calls.Load() - before,
+		"elapsed_ms":     elapsed.Milliseconds(),
+		"explanation":    "the peer failed twice; the client retried with exponential backoff and jitter",
+		"conv_reference": "CONV-10",
+	}
+	if err != nil {
+		result["outcome"] = "error: " + err.Error()
+		runko.JSON(w, http.StatusOK, result)
+		return
+	}
+	defer resp.Body.Close()
+	result["outcome"] = fmt.Sprintf("succeeded with %d after retrying", resp.StatusCode)
+	runko.JSON(w, http.StatusOK, result)
+}
+
+// DemoBreaker shows the circuit breaker shedding load.
+//
+// Against a peer that always fails, the breaker opens and later calls stop
+// leaving this process at all — which is the point. Compare peer_calls with
+// attempts: the gap is load the peer never had to absorb.
+func (h *handlers) DemoBreaker(w http.ResponseWriter, r *http.Request) {
+	// A dedicated client, so the demo cannot trip the breaker that the
+	// other endpoints share.
+	client := runko.NewServiceClient(runko.ServiceClientConfig{
+		BaseURL:          h.peerURL,
+		Timeout:          2 * time.Second,
+		MaxRetries:       -1, // one attempt per call, so the breaker math is legible
+		CircuitThreshold: 3,
 		CircuitCooldown:  30 * time.Second,
 	})
-	// Usage in a handler:
-	//   var orders []Order
-	//   err := orderClient.GetJSON(r.Context(), "/api/v1/orders?user_id="+id, &orders)
+
+	before := h.upstream.calls.Load()
+	outcomes := make([]string, 0, 6)
+
+	for i := 1; i <= 6; i++ {
+		resp, err := client.Get(r.Context(), "/down")
+		switch {
+		case err != nil:
+			outcomes = append(outcomes, fmt.Sprintf("call %d: %v", i, err))
+		default:
+			outcomes = append(outcomes, fmt.Sprintf("call %d: HTTP %d", i, resp.StatusCode))
+			resp.Body.Close()
+		}
+	}
+
+	runko.JSON(w, http.StatusOK, runko.Map{
+		"outcomes":       outcomes,
+		"peer_calls":     h.upstream.calls.Load() - before,
+		"attempts":       6,
+		"explanation":    "MaxRetries: -1 means one attempt each; after 3 failures the breaker opened and the remaining calls never left this process",
+		"conv_reference": "CONV-10",
+	})
+}
+
+// DemoTrace shows W3C trace context surviving the hop.
+//
+// Send a traceparent with your request and the peer reports the same value
+// back: RunkoGO forwards it byte-for-byte rather than creating a span of
+// its own, so it does not sever a trace passing through.
+func (h *handlers) DemoTrace(w http.ResponseWriter, r *http.Request) {
+	var echoed map[string]any
+	if err := h.users.GetJSON(r.Context(), "/echo", &echoed); err != nil {
+		runko.RespondError(w, r, h.logger, runko.Internal(err))
+		return
+	}
+
+	runko.JSON(w, http.StatusOK, runko.Map{
+		"sent_by_you": runko.Map{
+			"traceparent": r.Header.Get("traceparent"),
+			"tracestate":  r.Header.Get("tracestate"),
+		},
+		"peer_received":  echoed["seen_by_peer"],
+		"request_id":     runko.RequestID(r.Context()),
+		"explanation":    "traceparent and tracestate are forwarded unchanged; the request ID is generated here and propagated",
+		"conv_reference": "CONV-12",
+		"try_this":       `curl -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' http://localhost:19100/demo/trace`,
+	})
+}
+
+// Index lists what there is to try.
+func (h *handlers) Index(w http.ResponseWriter, r *http.Request) {
+	runko.JSON(w, http.StatusOK, runko.Map{
+		"what": "RunkoGO service-to-service example. The scaffold covers a single service; this covers calling another one.",
+		"endpoints": []runko.Map{
+			{"GET /api/v1/orders/{id}": "ordinary call — enriches a local order from the users service"},
+			{"GET /demo/retry": "the peer fails twice; watch the client retry (CONV-10)"},
+			{"GET /demo/breaker": "the peer always fails; watch the breaker shed load (CONV-10)"},
+			{"GET /demo/trace": "send a traceparent header and see it survive the hop (CONV-12)"},
+		},
+		"peer": "a plain net/http server on :19101, standing in for a service you do not control",
+	})
+}
+
+func main() {
+	app := runko.New(runko.Options{
+		ServiceName:     "orders",
+		ShutdownTimeout: 10 * time.Second,
+		LogLevel:        os.Getenv("LOG_LEVEL"),
+		PreStopDelay:    -1, // no load balancer in front of a local demo
+	})
+
+	port := app.Config.GetDefault("PORT", "19100")
+	peerPort := app.Config.GetDefault("UPSTREAM_PORT", "19101")
+	peerURL := "http://127.0.0.1:" + peerPort
 
 	// ---------------------------------------------------------------
-	// Step 9: Run
+	// The peer, started and stopped with this process.
 	// ---------------------------------------------------------------
-	// This blocks until SIGINT or SIGTERM. The full lifecycle is:
-	// 1. Run startup hooks
-	// 2. Start HTTP server
-	// 3. Mark as ready
-	// 4. Serve requests
-	// 5. Receive shutdown signal
-	// 6. Mark as not ready (load balancer stops sending traffic)
-	// 7. Drain in-flight requests (up to ShutdownTimeout)
-	// 8. Run shutdown hooks
-	// 9. Exit
+	peer := &upstream{}
+	peerServer := &http.Server{
+		Addr:              "127.0.0.1:" + peerPort,
+		Handler:           peer.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	app.OnStartup(func(ctx context.Context) error {
+		go func() {
+			if err := peerServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				app.Logger.Error("peer service failed", "error", err)
+			}
+		}()
+		app.Logger.Info("peer service started", "addr", peerServer.Addr)
+		return nil
+	})
+	app.OnShutdown(func(ctx context.Context) error {
+		app.Logger.Info("stopping peer service")
+		return peerServer.Shutdown(ctx)
+	})
+
+	// ---------------------------------------------------------------
+	// The client. These are the knobs worth understanding.
+	// ---------------------------------------------------------------
+	users := runko.NewServiceClient(runko.ServiceClientConfig{
+		BaseURL: peerURL,
+
+		// Bounds one attempt, not the whole call — with retries the total
+		// can approach Timeout × (MaxRetries + 1) plus backoff.
+		Timeout: 2 * time.Second,
+
+		// Retries apply to idempotent methods and 5xx responses. POST is
+		// never replayed unless you opt in, because a transport error is
+		// not proof the peer did not process the request (CONV-10).
+		MaxRetries: 2,
+		RetryDelay: 100 * time.Millisecond,
+
+		// The breaker is per client instance and per process. It is not
+		// shared across replicas.
+		CircuitThreshold: 3,
+		CircuitCooldown:  10 * time.Second,
+
+		// Caps the response body so a misbehaving peer cannot exhaust
+		// memory here (CONV-06).
+		MaxResponseSize: 1 << 20,
+	})
+
+	h := &handlers{users: users, upstream: peer, peerURL: peerURL, logger: app.Logger}
+
+	// ---------------------------------------------------------------
+	// Middleware. Order matters — see CONV-04 and CONV-08.
+	// ---------------------------------------------------------------
+	app.Router.Use(
+		runko.Recovery(app.Logger),
+		runko.BodyLimit(1<<20),
+		runko.DefaultSecurityHeaders(),
+		runko.RequestIDMiddleware(),
+		runko.ClientIPMiddleware(app.Proxy),
+		runko.Logger(app.Logger),
+	)
+
+	app.Router.HandleFunc("GET /{$}", h.Index)
+	app.Router.HandleFunc("GET /demo", h.Index)
+	app.Router.HandleFunc("GET /api/v1/orders/{id}", h.GetOrder)
+	app.Router.HandleFunc("GET /demo/retry", h.DemoRetry)
+	app.Router.HandleFunc("GET /demo/breaker", h.DemoBreaker)
+	app.Router.HandleFunc("GET /demo/trace", h.DemoTrace)
+
+	app.AddHealthCheck("users-service", 2*time.Second, func(ctx context.Context) error {
+		resp, err := users.Get(ctx, "/users/1")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		return nil
+	})
+
+	app.Logger.Info("try it", "url", "http://localhost:"+port+"/demo")
+
 	if err := app.Run(); err != nil {
 		app.Logger.Error("application error", "error", err)
+		os.Exit(1)
 	}
 }

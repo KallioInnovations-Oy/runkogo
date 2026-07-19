@@ -2,16 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main, staging]
   pull_request:
-    branches: [main]
+    branches: [master, main, staging]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.22', '1.23']
+        go-version: ['1.23', 'stable']
 
     steps:
       - uses: actions/checkout@v4
@@ -28,12 +28,27 @@ jobs:
         run: |
           go vet ./...
           cd example && go vet ./...
+          cd ../scaffold && go vet ./...
 
       - name: Test with race detector
         run: go test -v -count=1 -race ./...
 
       - name: Build example
         run: cd example && go build -o /dev/null .
+
+      # The scaffold is the starting point people copy. It is a separate
+      # module, so it needs building explicitly or it can rot unnoticed.
+      - name: Build scaffold
+        run: cd scaffold && go build -o /dev/null .
+
+      # The demo page's JavaScript is not compiled by anything, so a syntax
+      # error there ships silently and takes every convention probe with it.
+      # Node is preinstalled on the runner.
+      - name: Check demo page JavaScript
+        run: |
+          node -e "const fs=require('fs');const h=fs.readFileSync('scaffold/static/index.html','utf8');fs.writeFileSync('page.js',h.slice(h.indexOf('<script>')+8,h.lastIndexOf('</script>')).replace('{{.APIKey}}','placeholder'));"
+          node --check page.js
+          rm page.js
 
       - name: Build Linux binary
         run: cd example && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null .
