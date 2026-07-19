@@ -97,7 +97,7 @@ runkogo/
 ### App Lifecycle
 
 ```go
-import runko "github.com/kallioinnovations/runkogo"
+import runko "github.com/KallioInnovations-Oy/runkogo"
 
 app := runko.New(runko.Options{
     ServiceName:     "my-service",

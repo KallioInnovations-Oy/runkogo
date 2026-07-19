@@ -32,7 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	runko "github.com/kallioinnovations/runkogo"
+	runko "github.com/KallioInnovations-Oy/runkogo"
 )
 
 // ==========================================================================

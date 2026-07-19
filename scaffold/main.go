@@ -34,7 +34,7 @@ import (
 	"strconv"
 	"time"
 
-	runko "github.com/kallioinnovations/runkogo"
+	runko "github.com/KallioInnovations-Oy/runkogo"
 )
 
 //go:embed static/index.html

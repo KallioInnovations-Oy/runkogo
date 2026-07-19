@@ -7,10 +7,32 @@ controls silently not apply, and every promise the project makes now
 resolves to a stated position in [CONVENTIONS.md](CONVENTIONS.md), enforced
 by tests that fail the build when code and docs drift apart.
 
+### The module is now installable
+
+`go.mod` declared `github.com/kallioinnovations/runkogo` while the
+repository is `github.com/KallioInnovations-Oy/runkogo`. The declared path
+404s, and requiring the real path failed on the mismatch:
+
+```
+module declares its path as: github.com/kallioinnovations/runkogo
+        but was required as: github.com/KallioInnovations-Oy/runkogo
+```
+
+So v1.0.0 could not be consumed by anyone, under either path. The module
+path now matches the repository:
+
+```go
+import runko "github.com/KallioInnovations-Oy/runkogo"
+```
+
+This is why the behavior changes below ship as a minor version rather than
+a v2: there is no v1 user to break.
+
 ### Behavior changes — read before upgrading
 
-These are visible to existing v1.0.0 users. They are corrections rather
-than redesigns, but they will change what your service does.
+No one could install v1.0.0, so nothing here breaks an existing user. They
+are listed anyway because they change what a service built on the previous
+source tree does, and anyone tracking this repo directly will feel them.
 
 - **Unmatched requests now run the middleware chain.** Previously 404s,
   405s and path-cleaning redirects went straight to `ServeMux` and bypassed
